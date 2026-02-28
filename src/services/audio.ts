@@ -8,14 +8,46 @@ export class AudioService {
   private recordingUrl: string | null = null;
   private playbackAudio: HTMLAudioElement | null = null;
   private currentAudio: HTMLAudioElement | null = null;
+
+  private buildTelephoneChain(): { input: BiquadFilterNode; output: DynamicsCompressorNode } {
+    const hp = this.audioContext!.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.value = 590;
+    hp.Q.value = 2.45;
+
+    const lp = this.audioContext!.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 4350;
+    lp.Q.value = 0.70;
+
+    const comp = this.audioContext!.createDynamicsCompressor();
+    comp.threshold.value = -60;
+    comp.knee.value = 13;
+    comp.ratio.value = 13.5;
+    comp.attack.value = 0.20;
+    comp.release.value = 0.77;
+
+    hp.connect(lp);
+    lp.connect(comp);
+    return { input: hp, output: comp };
+  }
+
   async initialize() {
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
       this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       this.source = this.audioContext.createMediaStreamSource(this.stream);
       this.gainNode = this.audioContext.createGain();
       this.gainNode.gain.value = 0;
-      this.source.connect(this.gainNode);
+      const chain = this.buildTelephoneChain();
+      this.source.connect(chain.input);
+      chain.output.connect(this.gainNode);
       this.gainNode.connect(this.audioContext.destination);
       await this.audioContext.resume();
     } catch (err) {
@@ -61,6 +93,12 @@ export class AudioService {
   playRecording(onEnded: () => void) {
     if (!this.recordingUrl) { onEnded(); return; }
     this.playbackAudio = new Audio(this.recordingUrl);
+    if (this.audioContext) {
+      const mediaSource = this.audioContext.createMediaElementSource(this.playbackAudio);
+      const chain = this.buildTelephoneChain();
+      mediaSource.connect(chain.input);
+      chain.output.connect(this.audioContext.destination);
+    }
     this.playbackAudio.onended = onEnded;
     this.playbackAudio.play().catch(() => {});
   }
@@ -83,6 +121,12 @@ export class AudioService {
       const audio = new Audio(src);
       audio.oncanplaythrough = () => {
         this.currentAudio = audio;
+        if (this.audioContext) {
+          const mediaSource = this.audioContext.createMediaElementSource(audio);
+          const chain = this.buildTelephoneChain();
+          mediaSource.connect(chain.input);
+          chain.output.connect(this.audioContext.destination);
+        }
         audio.onended = () => {
           this.currentAudio = null;
           onEnded?.();
