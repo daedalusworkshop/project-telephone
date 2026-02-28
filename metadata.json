@@ -1,0 +1,7 @@
+{
+  "name": "The Operator",
+  "description": "A quiet archive of longing.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
