@@ -23,7 +23,7 @@ export class AudioService {
 
   // System sound params — beep, ring, voice prompts, TTS
   private sounds = {
-    promptVolume: 1.0,
+    promptVolume: 0.08,
     ttsRate: 0.85,
     ttsPitch: 0.9,
     ttsVolume: 1.0,
@@ -39,6 +39,12 @@ export class AudioService {
 
   // Live ring master gain — sits on top of the envelope so volume can be changed mid-ring
   private ringingMasterGain: GainNode | null = null;
+  // Ring oscillators — stored so stopPlayback can hard-stop them immediately
+  private ringingOsc1: OscillatorNode | null = null;
+  private ringingOsc2: OscillatorNode | null = null;
+
+  // Audio element being loaded (not yet playing) — tracked to abort on cleanup
+  private pendingAudio: HTMLAudioElement | null = null;
 
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
@@ -285,6 +291,14 @@ export class AudioService {
   }
 
   stopPlayback() {
+    // Cancel any audio element that is still loading — prevents stale oncanplaythrough
+    // callbacks from firing after a StrictMode cleanup or early exit.
+    if (this.pendingAudio) {
+      this.pendingAudio.oncanplaythrough = null;
+      this.pendingAudio.onerror = null;
+      this.pendingAudio.src = '';
+      this.pendingAudio = null;
+    }
     if (this.playbackAudio) {
       this.playbackAudio.pause();
       this.playbackAudio.currentTime = 0;
@@ -296,19 +310,48 @@ export class AudioService {
       this.currentAudio = null;
       this.currentAudioGain = null;
     }
-    // Silence ringing if it's mid-cycle
+    // Hard-stop ring oscillators and silence the master gain
+    if (this.ringingOsc1) {
+      try { this.ringingOsc1.stop(); } catch { /* already stopped */ }
+      this.ringingOsc1 = null;
+    }
+    if (this.ringingOsc2) {
+      try { this.ringingOsc2.stop(); } catch { /* already stopped */ }
+      this.ringingOsc2 = null;
+    }
     if (this.ringingMasterGain) {
       this.ringingMasterGain.gain.value = 0;
       this.ringingMasterGain = null;
     }
+    // Cancel any in-progress TTS
+    window.speechSynthesis?.cancel();
   }
 
   // ── Voice prompts (pre-recorded MP3s) ────────────────────────────────────
 
   private async tryAudioFile(src: string, onEnded?: () => void): Promise<boolean> {
+    // Discard any previously pending audio so its callbacks can't fire late
+    if (this.pendingAudio) {
+      this.pendingAudio.oncanplaythrough = null;
+      this.pendingAudio.onerror = null;
+      this.pendingAudio.src = '';
+      this.pendingAudio = null;
+    }
+
     return new Promise((resolve) => {
       const audio = new Audio(src);
+      this.pendingAudio = audio;
+
+      const cleanup = () => {
+        // Only clean up if this audio element is still the active pending one
+        if (this.pendingAudio === audio) this.pendingAudio = null;
+      };
+
       audio.oncanplaythrough = () => {
+        // If stopPlayback was called before this fired, abort silently
+        if (this.pendingAudio !== audio) return;
+        cleanup();
+
         this.currentAudio = audio;
         if (this.audioContext) {
           const mediaSource = this.audioContext.createMediaElementSource(audio);
@@ -323,8 +366,18 @@ export class AudioService {
         audio.onerror = () => { this.currentAudio = null; this.currentAudioGain = null; resolve(false); };
         audio.play().then(() => resolve(true)).catch(() => resolve(false));
       };
-      audio.onerror = () => resolve(false);
-      setTimeout(() => resolve(false), 1000);
+
+      audio.onerror = () => { cleanup(); resolve(false); };
+
+      // Timeout: if loading stalls, fall through to TTS. Clear handlers first so a
+      // late oncanplaythrough can't play the audio alongside TTS.
+      setTimeout(() => {
+        if (this.pendingAudio !== audio) return; // already handled
+        cleanup();
+        audio.oncanplaythrough = null;
+        audio.onerror = null;
+        resolve(false);
+      }, 1000);
     });
   }
 
@@ -346,21 +399,28 @@ export class AudioService {
       utterance.pitch  = this.sounds.ttsPitch;
       utterance.volume = this.sounds.ttsVolume;
 
-      const speak = () => {
-        const voices = window.speechSynthesis.getVoices();
-        const voice = voices.find(v =>
-          v.name.includes('Samantha') ||
-          v.name.includes('Google UK English Female') ||
-          v.name.includes('Female')
-        ) || voices[0];
-        if (voice) utterance.voice = voice;
+      const speak = (() => {
+        // Guard: ensure speak() is only called once even if both the voiceschanged
+        // event and the 500ms fallback timeout fire close together.
+        let spoken = false;
+        return () => {
+          if (spoken) return;
+          spoken = true;
+          const voices = window.speechSynthesis.getVoices();
+          const voice = voices.find(v =>
+            v.name.includes('Samantha') ||
+            v.name.includes('Google UK English Female') ||
+            v.name.includes('Female')
+          ) || voices[0];
+          if (voice) utterance.voice = voice;
 
-        const fallback = setTimeout(done, this.estimateDuration(text) + 2000);
-        utterance.onend = () => { clearTimeout(fallback); done(); };
-        utterance.onerror = done;
+          const fallback = setTimeout(done, this.estimateDuration(text) + 2000);
+          utterance.onend = () => { clearTimeout(fallback); done(); };
+          utterance.onerror = () => { clearTimeout(fallback); done(); };
 
-        window.speechSynthesis.speak(utterance);
-      };
+          window.speechSynthesis.speak(utterance);
+        };
+      })();
 
       if (window.speechSynthesis.getVoices().length > 0) {
         speak();
@@ -423,6 +483,10 @@ export class AudioService {
     this.ringingMasterGain = this.audioContext.createGain();
     this.ringingMasterGain.gain.value = ringVolume;
 
+    // Store refs so stopPlayback() can hard-stop them
+    this.ringingOsc1 = osc1;
+    this.ringingOsc2 = osc2;
+
     osc1.type = 'sine'; osc1.frequency.value = ringFreq1;
     osc2.type = 'sine'; osc2.frequency.value = ringFreq2;
 
@@ -446,6 +510,8 @@ export class AudioService {
     osc2.stop(now + totalSec);
 
     setTimeout(() => {
+      this.ringingOsc1 = null;
+      this.ringingOsc2 = null;
       this.ringingMasterGain = null;
       onEnded?.();
     }, durationMs);

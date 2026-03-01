@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Leva, useControls, folder } from 'leva';
 import { audioService } from './services/audio';
@@ -6,8 +6,11 @@ import { audioService } from './services/audio';
 const STORAGE_KEY = 'telephone-dsp';
 
 const DSP_DEFAULTS = {
+  // Mic monitoring (sidetone)
   monitorVolume: 0.42,
+  // Recorded message playback
   playbackVolume: 0.41,
+  // Shared telephone DSP chain
   preGain: 0.80,
   highPass: 590,
   lowPass: 4350,
@@ -15,6 +18,22 @@ const DSP_DEFAULTS = {
   ratio: 3.0,
   attack: 0.32,
   release: 0.77,
+  // Voice prompts (pre-recorded MP3s)
+  promptVolume: 0.08,
+  // TTS fallback
+  ttsVolume: 1.0,
+  ttsRate: 0.85,
+  ttsPitch: 0.9,
+  // Ring tone
+  ringVolume: 0.12,
+  ringFreq1: 440,
+  ringFreq2: 480,
+  ringOnSec: 2,
+  ringCycleSec: 6,
+  // Beep (start-recording tone)
+  beepVolume: 0.1,
+  beepFreq: 800,
+  beepDuration: 0.5,
 };
 
 function loadDSP(): typeof DSP_DEFAULTS {
@@ -43,6 +62,52 @@ type AppState =
   | 'DISCARD_EXIT'
   | 'END'
   | 'ERROR';
+
+const TIMELINE_STEPS: Array<{ state: AppState; label: string }> = [
+  { state: 'START',          label: 'start' },
+  { state: 'OATH',           label: 'oath'  },
+  { state: 'CALL',           label: 'call'  },
+  { state: 'RECORDING',      label: 'rec'   },
+  { state: 'POST_RECORDING', label: 'post'  },
+  { state: 'PLAYBACK',       label: 'play'  },
+  { state: 'SEND_EXIT',      label: 'send'  },
+  { state: 'DISCARD_EXIT',   label: 'disc'  },
+  { state: 'END',            label: 'end'   },
+  { state: 'ERROR',          label: 'err'   },
+];
+
+function DevTimeline({ current, onJump }: { current: AppState; onJump: (s: AppState) => void }) {
+  return (
+    <div className="fixed bottom-0 left-0 right-0 flex justify-center pb-5 z-50 pointer-events-none">
+      <div className="flex items-end gap-px pointer-events-auto">
+        {TIMELINE_STEPS.map((step, i) => {
+          const active = current === step.state;
+          return (
+            <button
+              key={step.state}
+              onClick={() => onJump(step.state)}
+              className="flex flex-col items-center gap-1 px-3 py-2 group transition-colors duration-150"
+              style={{ fontFamily: 'monospace' }}
+            >
+              {active && (
+                <span className="block w-1 h-1 rounded-full bg-white mb-0.5" />
+              )}
+              {!active && (
+                <span className="block w-1 h-1 mb-0.5" />
+              )}
+              <span className={`text-sm transition-colors duration-150 ${active ? 'text-white' : 'text-white/25 group-hover:text-white/60'}`}>
+                {i + 1}
+              </span>
+              <span className={`text-[9px] uppercase tracking-widest transition-colors duration-150 ${active ? 'text-white/60' : 'text-white/15 group-hover:text-white/40'}`}>
+                {step.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 function StartScreen({ onNext, onError }: { key?: string, onNext: () => void, onError: () => void }) {
   const [showNext, setShowNext] = useState(false);
@@ -184,6 +249,10 @@ const PROMPT_LINE_DELAYS = [0, 4000, 8000, 12000, 16500];
 
 function CallScreen({ onComplete }: { key?: string, onComplete: () => void }) {
   const [visibleLines, setVisibleLines] = useState<number[]>([]);
+  // Stable ref so the effect closure always calls the latest onComplete without
+  // being listed as a dependency (which would restart the sequence on re-render).
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     let isMounted = true;
@@ -220,12 +289,16 @@ function CallScreen({ onComplete }: { key?: string, onComplete: () => void }) {
         );
       });
 
-      if (isMounted) onComplete();
+      if (isMounted) onCompleteRef.current();
     };
 
     runSequence();
-    return () => { isMounted = false; };
-  }, [onComplete]);
+    return () => {
+      isMounted = false;
+      audioService.stopPlayback();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <motion.div
@@ -235,20 +308,19 @@ function CallScreen({ onComplete }: { key?: string, onComplete: () => void }) {
       transition={{ duration: 2 }}
       className="absolute inset-0 flex flex-col items-center justify-center text-center px-8 space-y-3"
     >
-      {PROMPT_LINES.map((line, index) => (
-        <AnimatePresence key={index}>
-          {visibleLines.includes(index) && (
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 1.5 }}
-              className="text-xl tracking-wide text-white/80"
-            >
-              {line}
-            </motion.p>
-          )}
-        </AnimatePresence>
-      ))}
+      <AnimatePresence>
+        {visibleLines.map(i => (
+          <motion.p
+            key={i}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 1.5 }}
+            className="text-xl tracking-wide text-white/80"
+          >
+            {PROMPT_LINES[i]}
+          </motion.p>
+        ))}
+      </AnimatePresence>
     </motion.div>
   );
 }
@@ -279,6 +351,7 @@ function RecordingScreen({ onHangup }: { key?: string, onHangup: () => void }) {
     return () => {
       isMounted = false;
       window.removeEventListener('keydown', handleKeyDown);
+      audioService.stopRecording();
     };
   }, [onHangup]);
 
@@ -442,7 +515,7 @@ export default function App() {
     'Monitoring': folder({
       monitorVolume: {
         label: 'Volume',
-        value: saved.monitorVolume, min: 0, max: 1, step: 0.01,
+        value: saved.monitorVolume, min: 0, max: 2, step: 0.01,
         hint: 'How loud you hear your own mic in the speakers while speaking (sidetone). Lets you tell if the telephone effect is working before you record.',
         onChange: (v: number) => { audioService.setSidetoneVolume(v); saveDSP('monitorVolume', v); },
       },
@@ -450,7 +523,7 @@ export default function App() {
     'Playback': folder({
       playbackVolume: {
         label: 'Volume',
-        value: saved.playbackVolume, min: 0, max: 1, step: 0.01,
+        value: saved.playbackVolume, min: 0, max: 2, step: 0.01,
         hint: 'How loud your recorded message plays back when you press Listen (option 2). Does not affect the recording itself.',
         onChange: (v: number) => { audioService.setPlaybackVolume(v); saveDSP('playbackVolume', v); },
       },
@@ -503,11 +576,92 @@ export default function App() {
         onChange: (v: number) => { audioService.setCompRelease(v); saveDSP('release', v); },
       },
     }, { collapsed: true }),
+    'Voice Prompts': folder({
+      promptVolume: {
+        label: 'Volume',
+        value: saved.promptVolume, min: 0, max: 2, step: 0.01,
+        hint: 'Volume of the pre-recorded MP3 files: welcome, operator prompt, thank-you, and farewell. These also pass through the telephone DSP chain.',
+        onChange: (v: number) => { audioService.setPromptVolume(v); saveDSP('promptVolume', v); },
+      },
+    }, { collapsed: true }),
+    'TTS Fallback': folder({
+      ttsVolume: {
+        label: 'Volume',
+        value: saved.ttsVolume, min: 0, max: 1, step: 0.01,
+        hint: 'Volume of the browser text-to-speech voice. Only used when an MP3 file fails to load.',
+        onChange: (v: number) => { audioService.setTTSVolume(v); saveDSP('ttsVolume', v); },
+      },
+      ttsRate: {
+        label: 'Rate',
+        value: saved.ttsRate, min: 0.1, max: 2, step: 0.05,
+        hint: 'Speaking speed of the TTS voice. 1.0 = normal, 0.5 = half speed, 2.0 = double speed. Lower is warmer and more deliberate.',
+        onChange: (v: number) => { audioService.setTTSRate(v); saveDSP('ttsRate', v); },
+      },
+      ttsPitch: {
+        label: 'Pitch',
+        value: saved.ttsPitch, min: 0, max: 2, step: 0.05,
+        hint: 'Pitch of the TTS voice. 1.0 = natural, below 1 = deeper/masculine, above 1 = higher. Only affects the browser synthesis fallback.',
+        onChange: (v: number) => { audioService.setTTSPitch(v); saveDSP('ttsPitch', v); },
+      },
+    }, { collapsed: true }),
+    'Ring': folder({
+      ringVolume: {
+        label: 'Volume',
+        value: saved.ringVolume, min: 0, max: 2, step: 0.01,
+        hint: 'Loudness of the ringing tone. Adjustable live while the phone is ringing — no need to wait for the next ring cycle.',
+        onChange: (v: number) => { audioService.setRingVolume(v); saveDSP('ringVolume', v); },
+      },
+      ringFreq1: {
+        label: 'Freq 1 Hz',
+        value: saved.ringFreq1, min: 100, max: 2000, step: 1,
+        hint: 'Frequency of the first ringing oscillator. Traditional telephone ring uses 440 Hz + 480 Hz. Detune from Freq 2 to widen the beating effect.',
+        onChange: (v: number) => { audioService.setRingFreq1(v); saveDSP('ringFreq1', v); },
+      },
+      ringFreq2: {
+        label: 'Freq 2 Hz',
+        value: saved.ringFreq2, min: 100, max: 2000, step: 1,
+        hint: 'Frequency of the second ringing oscillator. The difference between Freq 1 and Freq 2 creates an interference / beating effect.',
+        onChange: (v: number) => { audioService.setRingFreq2(v); saveDSP('ringFreq2', v); },
+      },
+      ringOnSec: {
+        label: 'Ring On s',
+        value: saved.ringOnSec, min: 0.1, max: 5, step: 0.1,
+        hint: 'How many seconds the ring sounds before going silent. US standard is 2 s on, UK is 0.4 s on.',
+        onChange: (v: number) => { audioService.setRingOnSec(v); saveDSP('ringOnSec', v); },
+      },
+      ringCycleSec: {
+        label: 'Cycle s',
+        value: saved.ringCycleSec, min: 1, max: 10, step: 0.1,
+        hint: 'Total length of one ring cycle (on + silent). Silence = Cycle − Ring On. US standard is 6 s (2 s ring, 4 s silence).',
+        onChange: (v: number) => { audioService.setRingCycleSec(v); saveDSP('ringCycleSec', v); },
+      },
+    }, { collapsed: true }),
+    'Beep': folder({
+      beepVolume: {
+        label: 'Volume',
+        value: saved.beepVolume, min: 0, max: 2, step: 0.01,
+        hint: 'Loudness of the recording-start beep tone.',
+        onChange: (v: number) => { audioService.setBeepVolume(v); saveDSP('beepVolume', v); },
+      },
+      beepFreq: {
+        label: 'Freq Hz',
+        value: saved.beepFreq, min: 100, max: 4000, step: 10,
+        hint: 'Pitch of the beep. 800 Hz is a standard answering-machine beep. Lower is warmer, higher is more alerting.',
+        onChange: (v: number) => { audioService.setBeepFreq(v); saveDSP('beepFreq', v); },
+      },
+      beepDuration: {
+        label: 'Duration s',
+        value: saved.beepDuration, min: 0.1, max: 2, step: 0.05,
+        hint: 'How long the beep lasts. Shorter = snappy cue, longer = more deliberate / ceremonial.',
+        onChange: (v: number) => { audioService.setBeepDuration(v); saveDSP('beepDuration', v); },
+      },
+    }, { collapsed: true }),
   });
 
   return (
     <>
     <Leva hidden={!panelVisible} />
+    {panelVisible && <DevTimeline current={state} onJump={setState} />}
     <div className="fixed inset-0 bg-black text-white/90 font-serif selection:bg-white/10 cursor-default">
       <AnimatePresence mode="wait">
         {state === 'START' && (
