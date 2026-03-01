@@ -12,7 +12,7 @@ if (!fs.existsSync(RECORDINGS_DIR)) {
 
 app.use((_, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Recording-Time');
   next();
 });
 app.options('/api/recordings', (_, res) => res.sendStatus(204));
@@ -20,7 +20,10 @@ app.options('/api/recordings', (_, res) => res.sendStatus(204));
 app.use(express.raw({ type: 'audio/*', limit: '50mb' }));
 
 app.post('/api/recordings', (req, res) => {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const clientTime = req.headers['x-recording-time'];
+  const timestamp = typeof clientTime === 'string' && /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(clientTime)
+    ? clientTime
+    : new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `recording-${timestamp}.webm`;
   const filepath = path.join(RECORDINGS_DIR, filename);
 

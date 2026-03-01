@@ -43,6 +43,7 @@ export class AudioService {
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
   private recordingUrl: string | null = null;
+  private recordingTimestamp: string | null = null;
   private playbackAudio: HTMLAudioElement | null = null;
   private playbackGainNode: GainNode | null = null;
   private currentAudio: HTMLAudioElement | null = null;
@@ -238,6 +239,17 @@ export class AudioService {
   startRecording() {
     if (!this.stream) return;
     this.recordedChunks = [];
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    this.recordingTimestamp = [
+      now.getFullYear(),
+      pad(now.getMonth() + 1),
+      pad(now.getDate()),
+    ].join('-') + '_' + [
+      pad(now.getHours()),
+      pad(now.getMinutes()),
+      pad(now.getSeconds()),
+    ].join('-');
     this.mediaRecorder = new MediaRecorder(this.stream);
     this.mediaRecorder.ondataavailable = (e) => {
       if (e.data.size > 0) this.recordedChunks.push(e.data);
@@ -444,9 +456,11 @@ export class AudioService {
   async uploadRecording() {
     if (!this.recordedChunks.length) return;
     const blob = new Blob(this.recordedChunks, { type: 'audio/webm' });
+    const headers: Record<string, string> = { 'Content-Type': 'audio/webm' };
+    if (this.recordingTimestamp) headers['X-Recording-Time'] = this.recordingTimestamp;
     await fetch('http://localhost:3001/api/recordings', {
       method: 'POST',
-      headers: { 'Content-Type': 'audio/webm' },
+      headers,
       body: blob,
     });
   }
