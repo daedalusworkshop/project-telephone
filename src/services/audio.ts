@@ -12,23 +12,45 @@ export class AudioService {
 
   private sidetoneVolume = 0.42;
 
-  // DSP defaults — shared between live sidetone chain and on-demand playback chains
+  // DSP defaults — used by sidetone chain (live) and playback/prompt chains (on-demand)
   private dsp = {
     preGain: 0.80,
-    hpFreq: 590,   hpQ: 2.45,
-    lpFreq: 4350,  lpQ: 0.70,
+    hpFreq: 590,  hpQ: 2.45,
+    lpFreq: 4350, lpQ: 0.70,
     compThreshold: -26, compKnee: 13, compRatio: 3.0,
     compAttack: 0.32, compRelease: 0.77,
   };
+
+  // System sound params — beep, ring, voice prompts, TTS
+  private sounds = {
+    promptVolume: 1.0,
+    ttsRate: 0.85,
+    ttsPitch: 0.9,
+    ttsVolume: 1.0,
+    beepFreq: 800,
+    beepVolume: 0.1,
+    beepDuration: 0.5,
+    ringVolume: 0.12,
+    ringFreq1: 440,
+    ringFreq2: 480,
+    ringOnSec: 2,
+    ringCycleSec: 6,
+  };
+
+  // Live ring master gain — sits on top of the envelope so volume can be changed mid-ring
+  private ringingMasterGain: GainNode | null = null;
 
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
   private recordingUrl: string | null = null;
   private playbackAudio: HTMLAudioElement | null = null;
+  private playbackGainNode: GainNode | null = null;
   private currentAudio: HTMLAudioElement | null = null;
+  private currentAudioGain: GainNode | null = null;
   private playbackVolume = 0.41;
 
-  // Builds a fresh telephone DSP chain using current dsp params (used for playback / TTS).
+  // ── DSP chain builder (used for playback & prompt chains) ────────────────
+
   private buildTelephoneChain(): { input: GainNode; output: DynamicsCompressorNode } {
     const ctx = this.audioContext!;
 
@@ -58,6 +80,8 @@ export class AudioService {
     return { input: pre, output: comp };
   }
 
+  // ── Init ─────────────────────────────────────────────────────────────────
+
   async initialize() {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
@@ -70,7 +94,7 @@ export class AudioService {
       this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       this.source = this.audioContext.createMediaStreamSource(this.stream);
 
-      // Build sidetone chain and store every node for live param updates
+      // Build and store sidetone chain for live param updates
       this.preGainNode = this.audioContext.createGain();
       this.preGainNode.gain.value = this.dsp.preGain;
 
@@ -92,7 +116,7 @@ export class AudioService {
       this.compNode.release.value = this.dsp.compRelease;
 
       this.outputGainNode = this.audioContext.createGain();
-      this.outputGainNode.gain.value = 0; // starts muted; setSidetone() opens it
+      this.outputGainNode.gain.value = 0; // muted until setSidetone(true)
 
       this.source.connect(this.preGainNode);
       this.preGainNode.connect(this.hpNode);
@@ -108,7 +132,7 @@ export class AudioService {
     }
   }
 
-  // ── Live param setters ────────────────────────────────────────────────────
+  // ── Sidetone / mic chain setters ─────────────────────────────────────────
 
   setSidetoneVolume(v: number) {
     this.sidetoneVolume = v;
@@ -152,12 +176,45 @@ export class AudioService {
     if (this.compNode) this.compNode.release.value = v;
   }
 
+  // ── Playback (recorded message) setters ──────────────────────────────────
+
   setPlaybackVolume(v: number) {
     this.playbackVolume = v;
-    if (this.playbackAudio) this.playbackAudio.volume = v;
+    if (this.playbackGainNode) this.playbackGainNode.gain.value = v;
   }
 
-  // ── Sidetone on/off ──────────────────────────────────────────────────────
+  // ── Voice prompt setters ─────────────────────────────────────────────────
+
+  setPromptVolume(v: number) {
+    this.sounds.promptVolume = v;
+    if (this.currentAudioGain) this.currentAudioGain.gain.value = v;
+  }
+
+  // ── TTS setters ───────────────────────────────────────────────────────────
+
+  setTTSRate(v: number)   { this.sounds.ttsRate = v; }
+  setTTSPitch(v: number)  { this.sounds.ttsPitch = v; }
+  setTTSVolume(v: number) { this.sounds.ttsVolume = v; }
+
+  // ── Beep setters ──────────────────────────────────────────────────────────
+
+  setBeepFreq(v: number)     { this.sounds.beepFreq = v; }
+  setBeepVolume(v: number)   { this.sounds.beepVolume = v; }
+  setBeepDuration(v: number) { this.sounds.beepDuration = v; }
+
+  // ── Ring setters ──────────────────────────────────────────────────────────
+
+  setRingVolume(v: number) {
+    this.sounds.ringVolume = v;
+    // Live-adjust master gain if ring is currently playing
+    if (this.ringingMasterGain) this.ringingMasterGain.gain.value = v;
+  }
+  setRingFreq1(v: number)    { this.sounds.ringFreq1 = v; }
+  setRingFreq2(v: number)    { this.sounds.ringFreq2 = v; }
+  setRingOnSec(v: number)    { this.sounds.ringOnSec = v; }
+  setRingCycleSec(v: number) { this.sounds.ringCycleSec = v; }
+
+  // ── Sidetone on/off ───────────────────────────────────────────────────────
 
   setSidetone(enabled: boolean) {
     if (this.outputGainNode && this.audioContext) {
@@ -176,7 +233,7 @@ export class AudioService {
     }
   }
 
-  // ── Recording ────────────────────────────────────────────────────────────
+  // ── Recording ─────────────────────────────────────────────────────────────
 
   startRecording() {
     if (!this.stream) return;
@@ -202,14 +259,16 @@ export class AudioService {
   playRecording(onEnded: () => void) {
     if (!this.recordingUrl) { onEnded(); return; }
     this.playbackAudio = new Audio(this.recordingUrl);
-    this.playbackAudio.volume = this.playbackVolume;
     if (this.audioContext) {
       const mediaSource = this.audioContext.createMediaElementSource(this.playbackAudio);
+      this.playbackGainNode = this.audioContext.createGain();
+      this.playbackGainNode.gain.value = this.playbackVolume;
       const chain = this.buildTelephoneChain();
-      mediaSource.connect(chain.input);
+      mediaSource.connect(this.playbackGainNode);
+      this.playbackGainNode.connect(chain.input);
       chain.output.connect(this.audioContext.destination);
     }
-    this.playbackAudio.onended = onEnded;
+    this.playbackAudio.onended = () => { this.playbackGainNode = null; onEnded(); };
     this.playbackAudio.play().catch(() => {});
   }
 
@@ -217,13 +276,22 @@ export class AudioService {
     if (this.playbackAudio) {
       this.playbackAudio.pause();
       this.playbackAudio.currentTime = 0;
+      this.playbackGainNode = null;
     }
     if (this.currentAudio) {
       this.currentAudio.pause();
       this.currentAudio.currentTime = 0;
       this.currentAudio = null;
+      this.currentAudioGain = null;
+    }
+    // Silence ringing if it's mid-cycle
+    if (this.ringingMasterGain) {
+      this.ringingMasterGain.gain.value = 0;
+      this.ringingMasterGain = null;
     }
   }
+
+  // ── Voice prompts (pre-recorded MP3s) ────────────────────────────────────
 
   private async tryAudioFile(src: string, onEnded?: () => void): Promise<boolean> {
     return new Promise((resolve) => {
@@ -232,12 +300,15 @@ export class AudioService {
         this.currentAudio = audio;
         if (this.audioContext) {
           const mediaSource = this.audioContext.createMediaElementSource(audio);
+          this.currentAudioGain = this.audioContext.createGain();
+          this.currentAudioGain.gain.value = this.sounds.promptVolume;
           const chain = this.buildTelephoneChain();
-          mediaSource.connect(chain.input);
+          mediaSource.connect(this.currentAudioGain);
+          this.currentAudioGain.connect(chain.input);
           chain.output.connect(this.audioContext.destination);
         }
-        audio.onended = () => { this.currentAudio = null; onEnded?.(); };
-        audio.onerror = () => { this.currentAudio = null; resolve(false); };
+        audio.onended = () => { this.currentAudio = null; this.currentAudioGain = null; onEnded?.(); };
+        audio.onerror = () => { this.currentAudio = null; this.currentAudioGain = null; resolve(false); };
         audio.play().then(() => resolve(true)).catch(() => resolve(false));
       };
       audio.onerror = () => resolve(false);
@@ -259,8 +330,9 @@ export class AudioService {
       window.speechSynthesis.cancel();
 
       const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 0.85;
-      utterance.pitch = 0.9;
+      utterance.rate   = this.sounds.ttsRate;
+      utterance.pitch  = this.sounds.ttsPitch;
+      utterance.volume = this.sounds.ttsVolume;
 
       const speak = () => {
         const voices = window.speechSynthesis.getVoices();
@@ -299,56 +371,75 @@ export class AudioService {
     return Math.max(3000, (words / wordsPerMin) * 60 * 1000);
   }
 
+  // ── Beep ──────────────────────────────────────────────────────────────────
+
   playBeep(onEnded?: () => void) {
-    if (!this.audioContext) { setTimeout(() => onEnded?.(), 600); return; }
+    const dur = this.sounds.beepDuration;
+    if (!this.audioContext) { setTimeout(() => onEnded?.(), dur * 1000 + 100); return; }
     if (this.audioContext.state === 'suspended') this.audioContext.resume();
 
-    const osc = this.audioContext.createOscillator();
+    const osc  = this.audioContext.createOscillator();
     const gain = this.audioContext.createGain();
+    const now  = this.audioContext.currentTime;
 
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(800, this.audioContext.currentTime);
-    gain.gain.setValueAtTime(0.1, this.audioContext.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, this.audioContext.currentTime + 0.5);
+    osc.frequency.setValueAtTime(this.sounds.beepFreq, now);
+    gain.gain.setValueAtTime(this.sounds.beepVolume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
 
     osc.connect(gain);
     gain.connect(this.audioContext.destination);
-    osc.start();
-    osc.stop(this.audioContext.currentTime + 0.5);
+    osc.start(now);
+    osc.stop(now + dur);
 
-    setTimeout(() => onEnded?.(), 600);
+    setTimeout(() => onEnded?.(), dur * 1000 + 100);
   }
+
+  // ── Ring ──────────────────────────────────────────────────────────────────
 
   playRinging(durationMs: number, onEnded?: () => void) {
     if (!this.audioContext) { setTimeout(() => onEnded?.(), durationMs); return; }
     if (this.audioContext.state === 'suspended') this.audioContext.resume();
 
+    const { ringFreq1, ringFreq2, ringVolume, ringOnSec, ringCycleSec } = this.sounds;
+
     const osc1 = this.audioContext.createOscillator();
     const osc2 = this.audioContext.createOscillator();
-    const gain = this.audioContext.createGain();
+    // Envelope gain: on/off pattern
+    const envelopeGain = this.audioContext.createGain();
+    // Master gain: live-adjustable volume
+    this.ringingMasterGain = this.audioContext.createGain();
+    this.ringingMasterGain.gain.value = ringVolume;
 
-    osc1.type = 'sine'; osc1.frequency.value = 440;
-    osc2.type = 'sine'; osc2.frequency.value = 480;
+    osc1.type = 'sine'; osc1.frequency.value = ringFreq1;
+    osc2.type = 'sine'; osc2.frequency.value = ringFreq2;
 
-    osc1.connect(gain);
-    osc2.connect(gain);
-    gain.connect(this.audioContext.destination);
+    osc1.connect(envelopeGain);
+    osc2.connect(envelopeGain);
+    envelopeGain.connect(this.ringingMasterGain);
+    this.ringingMasterGain.connect(this.audioContext.destination);
 
     const now = this.audioContext.currentTime;
-    gain.gain.setValueAtTime(0, now);
+    envelopeGain.gain.setValueAtTime(0, now);
 
-    for (let i = 0; i < durationMs / 1000; i += 6) {
-      gain.gain.setValueAtTime(0.12, now + i);
-      gain.gain.setValueAtTime(0.12, now + i + 2);
-      gain.gain.setValueAtTime(0, now + i + 2.05);
+    const totalSec = durationMs / 1000;
+    for (let t = 0; t < totalSec; t += ringCycleSec) {
+      envelopeGain.gain.setValueAtTime(1, now + t);
+      envelopeGain.gain.setValueAtTime(1, now + t + ringOnSec);
+      envelopeGain.gain.setValueAtTime(0, now + t + ringOnSec + 0.05);
     }
 
     osc1.start(now); osc2.start(now);
-    osc1.stop(now + durationMs / 1000);
-    osc2.stop(now + durationMs / 1000);
+    osc1.stop(now + totalSec);
+    osc2.stop(now + totalSec);
 
-    setTimeout(() => onEnded?.(), durationMs);
+    setTimeout(() => {
+      this.ringingMasterGain = null;
+      onEnded?.();
+    }, durationMs);
   }
+
+  // ── Upload ────────────────────────────────────────────────────────────────
 
   async uploadRecording() {
     if (!this.recordedChunks.length) return;

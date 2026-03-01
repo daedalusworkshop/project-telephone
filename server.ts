@@ -10,6 +10,13 @@ if (!fs.existsSync(RECORDINGS_DIR)) {
   fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
 }
 
+app.use((_, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
+app.options('/api/recordings', (_, res) => res.sendStatus(204));
+
 app.use(express.raw({ type: 'audio/*', limit: '50mb' }));
 
 app.post('/api/recordings', (req, res) => {
