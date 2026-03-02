@@ -4,6 +4,23 @@ import { Leva, useControls, folder } from 'leva';
 import { audioService } from './services/audio';
 
 const STORAGE_KEY = 'telephone-dsp';
+const FONT_KEY = 'telephone-font';
+
+const FONT_OPTIONS: Record<string, string> = {
+  'Nunito':              '"Nunito", ui-sans-serif, sans-serif',
+  'Cormorant Garamond':  '"Cormorant Garamond", ui-serif, serif',
+  'Lora':                '"Lora", ui-serif, serif',
+  'Fraunces':            '"Fraunces", ui-serif, serif',
+  'DM Serif Display':    '"DM Serif Display", ui-serif, serif',
+};
+const FONT_DEFAULT = 'Nunito';
+
+function loadFontName(): string {
+  return localStorage.getItem(FONT_KEY) ?? FONT_DEFAULT;
+}
+function saveFontName(name: string) {
+  localStorage.setItem(FONT_KEY, name);
+}
 
 const DSP_DEFAULTS = {
   // Mic monitoring (sidetone)
@@ -121,6 +138,7 @@ function StartScreen({ onNext, onError }: { key?: string, onNext: () => void, on
     try {
       await audioService.initialize();
       audioService.setSidetone(true);
+      document.documentElement.requestFullscreen?.().catch(() => {});
       onNext();
     } catch (e) {
       onError();
@@ -509,9 +527,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  useEffect(() => {
+    const family = FONT_OPTIONS[loadFontName()];
+    if (family) document.body.style.fontFamily = family;
+  }, []);
+
   const saved = loadDSP();
 
   useControls({
+    'Appearance': folder({
+      font: {
+        label: 'Font',
+        value: loadFontName(),
+        options: Object.keys(FONT_OPTIONS),
+        onChange: (name: string) => {
+          const family = FONT_OPTIONS[name];
+          if (family) {
+            document.body.style.fontFamily = family;
+            saveFontName(name);
+          }
+        },
+      },
+    }),
     'Monitoring': folder({
       monitorVolume: {
         label: 'Volume',

@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { execFile } from 'child_process';
 
 const app = express();
 const PORT = 3001;
@@ -34,6 +35,11 @@ app.post('/api/recordings', (req, res) => {
       return;
     }
     console.log(`Saved: ${filename}`);
+    const wavFilepath = filepath.replace(/\.webm$/, '.wav');
+    execFile('/opt/homebrew/bin/ffmpeg', ['-i', filepath, wavFilepath], (ffErr) => {
+      if (ffErr) console.error('Failed to convert to WAV:', ffErr.message);
+      else console.log(`Converted: ${path.basename(wavFilepath)}`);
+    });
     res.json({ filename });
   });
 });
