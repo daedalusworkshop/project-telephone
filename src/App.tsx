@@ -13,7 +13,7 @@ const FONT_OPTIONS: Record<string, string> = {
   'Fraunces':            '"Fraunces", ui-serif, serif',
   'DM Serif Display':    '"DM Serif Display", ui-serif, serif',
 };
-const FONT_DEFAULT = 'Nunito';
+const FONT_DEFAULT = 'Lora';
 
 function loadFontName(): string {
   return localStorage.getItem(FONT_KEY) ?? FONT_DEFAULT;
@@ -529,7 +529,7 @@ export default function App() {
 
   useEffect(() => {
     const family = FONT_OPTIONS[loadFontName()];
-    if (family) document.body.style.fontFamily = family;
+    if (family) document.documentElement.style.setProperty('--font-serif', family);
   }, []);
 
   const saved = loadDSP();
@@ -543,7 +543,7 @@ export default function App() {
         onChange: (name: string) => {
           const family = FONT_OPTIONS[name];
           if (family) {
-            document.body.style.fontFamily = family;
+            document.documentElement.style.setProperty('--font-serif', family);
             saveFontName(name);
           }
         },
