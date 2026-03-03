@@ -41,6 +41,8 @@ const DSP_DEFAULTS = {
   ttsVolume: 1.0,
   ttsRate: 0.85,
   ttsPitch: 0.9,
+  // Loudness normalization target
+  normalizeTarget: -16,
   // Ring tone
   ringVolume: 0.12,
   ringFreq1: 440,
@@ -254,26 +256,15 @@ function OathScreen({ onNext }: { key?: string, onNext: () => void }) {
   );
 }
 
-const PROMPT_LINES = [
-  "The operator isn't available right now.",
-  "She is asking: who do you wish to call?",
-  "What do you need the most right now?",
-  "Please leave your message after the tone.",
-  "She'll find a way to reach you.",
-];
-
-// Delays (ms) at which each line fades in, timed to approximate speech
-const PROMPT_LINE_DELAYS = [0, 4000, 8000, 12000, 16500];
-
-function CallScreen({ onComplete }: { key?: string, onComplete: () => void }) {
-  const [visibleLines, setVisibleLines] = useState<number[]>([]);
-  // Stable ref so the effect closure always calls the latest onComplete without
-  // being listed as a dependency (which would restart the sequence on re-render).
+function CallScreen({ onComplete, onShowQuestion }: { key?: string, onComplete: () => void, onShowQuestion: () => void }) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+  const onShowQuestionRef = useRef(onShowQuestion);
+  onShowQuestionRef.current = onShowQuestion;
 
   useEffect(() => {
     let isMounted = true;
+    let showQuestionTimer: ReturnType<typeof setTimeout>;
 
     const runSequence = async () => {
       // 1. Intro voice
@@ -292,12 +283,10 @@ function CallScreen({ onComplete }: { key?: string, onComplete: () => void }) {
       });
       if (!isMounted) return;
 
-      // 3. Prompt voice + text lines fading in simultaneously
-      PROMPT_LINE_DELAYS.forEach((delay, index) => {
-        setTimeout(() => {
-          if (isMounted) setVisibleLines(prev => [...prev, index]);
-        }, delay);
-      });
+      // 3. Show question 7s after ring ends, then play prompt audio
+      showQuestionTimer = setTimeout(() => {
+        if (isMounted) onShowQuestionRef.current();
+      }, 7000);
 
       await new Promise<void>(resolve => {
         audioService.speak(
@@ -313,41 +302,23 @@ function CallScreen({ onComplete }: { key?: string, onComplete: () => void }) {
     runSequence();
     return () => {
       isMounted = false;
+      clearTimeout(showQuestionTimer);
       audioService.stopPlayback();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 2 }}
-      className="absolute inset-0 flex flex-col items-center justify-center text-center px-8 space-y-3"
-    >
-      <AnimatePresence>
-        {visibleLines.map(i => (
-          <motion.p
-            key={i}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 1.5 }}
-            className="text-xl tracking-wide text-white/80"
-          >
-            {PROMPT_LINES[i]}
-          </motion.p>
-        ))}
-      </AnimatePresence>
-    </motion.div>
-  );
+  return <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0" />;
 }
 
 function RecordingScreen({ onHangup }: { key?: string, onHangup: () => void }) {
+  const onHangupRef = useRef(onHangup);
+  onHangupRef.current = onHangup;
+
   useEffect(() => {
     let isMounted = true;
 
-    setTimeout(() => {
+    const beepTimeout = setTimeout(() => {
       if (!isMounted) return;
       audioService.playBeep(() => {
         if (!isMounted) return;
@@ -361,50 +332,43 @@ function RecordingScreen({ onHangup }: { key?: string, onHangup: () => void }) {
         e.preventDefault();
         audioService.stopRecording();
         audioService.setSidetone(false);
-        onHangup();
+        onHangupRef.current();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       isMounted = false;
+      clearTimeout(beepTimeout);
       window.removeEventListener('keydown', handleKeyDown);
       audioService.stopRecording();
     };
-  }, [onHangup]);
+  }, []);
 
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 2 }}
-      className="absolute inset-0 flex flex-col items-center justify-center text-center"
-    >
-      <p className="text-sm tracking-widest text-white/40">Press spacebar to hang up.</p>
-    </motion.div>
-  );
+  return <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0" />;
 }
 
 function PostRecordingScreen({ onAction }: { key?: string, onAction: (action: number) => void }) {
   const [showOptions, setShowOptions] = useState(false);
+  const onActionRef = useRef(onAction);
+  onActionRef.current = onAction;
 
   useEffect(() => {
     // Dark pause — let the silence breathe before options appear
     const t = setTimeout(() => setShowOptions(true), 2000);
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === '1') onAction(1);
-      if (e.key === '2') onAction(2);
-      if (e.key === '3') onAction(3);
-      if (e.key === '4') onAction(4);
+      if (e.key === '1') onActionRef.current(1);
+      if (e.key === '2') onActionRef.current(2);
+      if (e.key === '3') onActionRef.current(3);
+      if (e.key === '4') onActionRef.current(4);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       clearTimeout(t);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [onAction]);
+  }, []);
 
   return (
     <div className="absolute inset-0 flex items-center justify-center">
@@ -429,29 +393,35 @@ function PostRecordingScreen({ onAction }: { key?: string, onAction: (action: nu
 }
 
 function PlaybackScreen({ onComplete }: { key?: string, onComplete: () => void }) {
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
   useEffect(() => {
     audioService.playRecording(() => {
-      onComplete();
+      onCompleteRef.current();
     });
     return () => {
       audioService.stopPlayback();
     };
-  }, [onComplete]);
+  }, []);
 
   return <div className="absolute inset-0 bg-black" />;
 }
 
 function SendExitScreen({ onComplete }: { key?: string, onComplete: () => void }) {
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
   useEffect(() => {
     let isMounted = true;
     audioService.uploadRecording().catch(() => {});
     audioService.speak("Thank you. The operator will find a way to reach you.", () => {
       setTimeout(() => {
-        if (isMounted) onComplete();
+        if (isMounted) onCompleteRef.current();
       }, 2000);
     }, '/audio/thank-you.mp3');
     return () => { isMounted = false; };
-  }, [onComplete]);
+  }, []);
 
   return (
     <motion.div
@@ -467,15 +437,18 @@ function SendExitScreen({ onComplete }: { key?: string, onComplete: () => void }
 }
 
 function DiscardExitScreen({ onComplete }: { key?: string, onComplete: () => void }) {
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
   useEffect(() => {
     let isMounted = true;
     audioService.speak("May you be well. I'll be here if you need me.", () => {
       setTimeout(() => {
-        if (isMounted) onComplete();
+        if (isMounted) onCompleteRef.current();
       }, 2000);
     }, '/audio/farewell.mp3');
     return () => { isMounted = false; };
-  }, [onComplete]);
+  }, []);
 
   return (
     <motion.div
@@ -492,13 +465,16 @@ function DiscardExitScreen({ onComplete }: { key?: string, onComplete: () => voi
 }
 
 function EndScreen({ onReset }: { key?: string, onReset: () => void }) {
+  const onResetRef = useRef(onReset);
+  onResetRef.current = onReset;
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Enter') onReset();
+      if (e.key === 'Enter') onResetRef.current();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onReset]);
+  }, []);
 
   return <div className="absolute inset-0 bg-black" />;
 }
@@ -518,6 +494,22 @@ function ErrorScreen({ key }: { key?: string }) {
 export default function App() {
   const [state, setState] = useState<AppState>('START');
   const [panelVisible, setPanelVisible] = useState(false);
+
+  const jumpToState = (next: AppState) => {
+    audioService.stopPlayback();
+    audioService.stopRecording();
+    audioService.setSidetone(false);
+    setState(next);
+  };
+  const [questionVisible, setQuestionVisible] = useState(false);
+  const [hintVisible, setHintVisible] = useState(false);
+
+  useEffect(() => {
+    if (state !== 'CALL' && state !== 'RECORDING') {
+      setQuestionVisible(false);
+    }
+    setHintVisible(state === 'RECORDING');
+  }, [state]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -563,6 +555,12 @@ export default function App() {
         value: saved.playbackVolume, min: 0, max: 2, step: 0.01,
         hint: 'How loud your recorded message plays back when you press Listen (option 2). Does not affect the recording itself.',
         onChange: (v: number) => { audioService.setPlaybackVolume(v); saveDSP('playbackVolume', v); },
+      },
+      normalizeTarget: {
+        label: 'Normalize Target dB',
+        value: saved.normalizeTarget, min: -30, max: -6, step: 1,
+        hint: 'Target loudness level (dBFS RMS) for all audio in the app — voice prompts and recordings are automatically leveled to this value at playback time. -16 dB is a good default.',
+        onChange: (v: number) => { audioService.setNormalizeTarget(v); saveDSP('normalizeTarget', v); },
       },
     }),
     'Input': folder({
@@ -698,8 +696,34 @@ export default function App() {
   return (
     <>
     <Leva hidden={!panelVisible} />
-    {panelVisible && <DevTimeline current={state} onJump={setState} />}
+    {panelVisible && <DevTimeline current={state} onJump={jumpToState} />}
     <div className="fixed inset-0 bg-black text-white/90 font-serif selection:bg-white/10 cursor-default">
+      <AnimatePresence>
+        {questionVisible && (
+          <motion.p
+            key="question"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 4, ease: 'easeIn' }}
+            className="absolute inset-0 flex items-center justify-center text-xl tracking-wide text-white/80 pointer-events-none z-10"
+          >
+            What do you need the most right now?
+          </motion.p>
+        )}
+        {hintVisible && (
+          <motion.p
+            key="hint"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 4, ease: 'easeIn' }}
+            className="absolute bottom-24 left-0 right-0 text-sm tracking-widest text-white/40 text-center pointer-events-none z-10"
+          >
+            Press spacebar to hang up.
+          </motion.p>
+        )}
+      </AnimatePresence>
       <AnimatePresence mode="wait">
         {state === 'START' && (
           <StartScreen key="start" onNext={() => setState('OATH')} onError={() => setState('ERROR')} />
@@ -708,7 +732,7 @@ export default function App() {
           <OathScreen key="oath" onNext={() => setState('CALL')} />
         )}
         {state === 'CALL' && (
-          <CallScreen key="call" onComplete={() => setState('RECORDING')} />
+          <CallScreen key="call" onComplete={() => setState('RECORDING')} onShowQuestion={() => setQuestionVisible(true)} />
         )}
         {state === 'RECORDING' && (
           <RecordingScreen key="recording" onHangup={() => setState('POST_RECORDING')} />

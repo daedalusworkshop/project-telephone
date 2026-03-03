@@ -19,6 +19,7 @@ export class AudioService {
     lpFreq: 4350, lpQ: 0.70,
     compThreshold: -26, compKnee: 13, compRatio: 3.0,
     compAttack: 0.32, compRelease: 0.77,
+    normalizeTarget: -16, // dBFS RMS target for all audio playback
   };
 
   // System sound params — beep, ring, voice prompts, TTS
@@ -45,15 +46,21 @@ export class AudioService {
 
   // Audio element being loaded (not yet playing) — tracked to abort on cleanup
   private pendingAudio: HTMLAudioElement | null = null;
+  // Monotonically-increasing token; incremented by stopPlayback() and each new
+  // tryAudioFile() call so that a stale call racing across an await knows to bail.
+  private tryAudioToken = 0;
 
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
   private recordingUrl: string | null = null;
+  private normGainPromise: Promise<number> = Promise.resolve(1);
   private recordingTimestamp: string | null = null;
   private playbackAudio: HTMLAudioElement | null = null;
   private playbackGainNode: GainNode | null = null;
+  private playbackMediaSource: MediaElementAudioSourceNode | null = null;
   private currentAudio: HTMLAudioElement | null = null;
   private currentAudioGain: GainNode | null = null;
+  private currentMediaSource: MediaElementAudioSourceNode | null = null;
   private playbackVolume = 0.41;
 
   // ── DSP chain builder (used for playback & prompt chains) ────────────────
@@ -90,6 +97,7 @@ export class AudioService {
   // ── Init ─────────────────────────────────────────────────────────────────
 
   async initialize() {
+    if (this.audioContext) return; // already initialized; reuse existing graph
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -211,6 +219,29 @@ export class AudioService {
 
   // ── Ring setters ──────────────────────────────────────────────────────────
 
+  setNormalizeTarget(v: number) { this.dsp.normalizeTarget = v; }
+
+  // ── Loudness normalization ────────────────────────────────────────────────
+
+  // Fetches and decodes audio at `src`, measures RMS loudness, and returns
+  // the linear gain needed to reach dsp.normalizeTarget (dBFS RMS).
+  private async computeNormGain(src: string): Promise<number> {
+    if (!this.audioContext) return 1;
+    try {
+      const resp = await fetch(src);
+      const arrayBuf = await resp.arrayBuffer();
+      const decoded = await this.audioContext.decodeAudioData(arrayBuf);
+      const data = decoded.getChannelData(0);
+      let sumSq = 0;
+      for (let i = 0; i < data.length; i++) sumSq += data[i] * data[i];
+      const rmsDb = 10 * Math.log10(sumSq / data.length + 1e-10);
+      const gainDb = this.dsp.normalizeTarget - rmsDb;
+      return Math.pow(10, Math.min(gainDb, 30) / 20); // cap at +30 dB
+    } catch {
+      return 1;
+    }
+  }
+
   setRingVolume(v: number) {
     this.sounds.ringVolume = v;
     // Live-adjust master gain if ring is currently playing
@@ -264,6 +295,8 @@ export class AudioService {
       const blob = new Blob(this.recordedChunks, { type: 'audio/webm' });
       if (this.recordingUrl) URL.revokeObjectURL(this.recordingUrl);
       this.recordingUrl = URL.createObjectURL(blob);
+      // Start analyzing loudness immediately so the gain is ready by playback time
+      this.normGainPromise = this.computeNormGain(this.recordingUrl);
     };
     this.mediaRecorder.start();
   }
@@ -276,21 +309,37 @@ export class AudioService {
 
   playRecording(onEnded: () => void) {
     if (!this.recordingUrl) { onEnded(); return; }
-    this.playbackAudio = new Audio(this.recordingUrl);
-    if (this.audioContext) {
-      const mediaSource = this.audioContext.createMediaElementSource(this.playbackAudio);
-      this.playbackGainNode = this.audioContext.createGain();
-      this.playbackGainNode.gain.value = this.playbackVolume;
-      const chain = this.buildTelephoneChain();
-      mediaSource.connect(this.playbackGainNode);
-      this.playbackGainNode.connect(chain.input);
-      chain.output.connect(this.audioContext.destination);
-    }
-    this.playbackAudio.onended = () => { this.playbackGainNode = null; onEnded(); };
-    this.playbackAudio.play().catch(() => {});
+    const url = this.recordingUrl;
+    this.normGainPromise.then(async normGain => {
+      // Ensure AudioContext is running before routing audio through the graph.
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        await this.audioContext.resume();
+      }
+      this.playbackAudio = new Audio(url);
+      if (this.audioContext) {
+        const mediaSource = this.audioContext.createMediaElementSource(this.playbackAudio);
+        this.playbackMediaSource = mediaSource;
+        this.playbackGainNode = this.audioContext.createGain();
+        this.playbackGainNode.gain.value = this.playbackVolume * normGain;
+        const chain = this.buildTelephoneChain();
+        mediaSource.connect(this.playbackGainNode);
+        this.playbackGainNode.connect(chain.input);
+        chain.output.connect(this.audioContext.destination);
+      }
+      this.playbackAudio.onended = () => {
+        this.playbackAudio = null;
+        this.playbackGainNode = null;
+        this.playbackMediaSource = null;
+        onEnded();
+      };
+      this.playbackAudio.play().catch(() => {});
+    });
   }
 
   stopPlayback() {
+    // Invalidate any in-flight tryAudioFile() call that is mid-await.
+    this.tryAudioToken++;
+
     // Cancel any audio element that is still loading — prevents stale oncanplaythrough
     // callbacks from firing after a StrictMode cleanup or early exit.
     if (this.pendingAudio) {
@@ -302,13 +351,22 @@ export class AudioService {
     if (this.playbackAudio) {
       this.playbackAudio.pause();
       this.playbackAudio.currentTime = 0;
+      this.playbackAudio = null;
       this.playbackGainNode = null;
+    }
+    if (this.playbackMediaSource) {
+      try { this.playbackMediaSource.disconnect(); } catch { /* already disconnected */ }
+      this.playbackMediaSource = null;
     }
     if (this.currentAudio) {
       this.currentAudio.pause();
       this.currentAudio.currentTime = 0;
       this.currentAudio = null;
       this.currentAudioGain = null;
+    }
+    if (this.currentMediaSource) {
+      try { this.currentMediaSource.disconnect(); } catch { /* already disconnected */ }
+      this.currentMediaSource = null;
     }
     // Hard-stop ring oscillators and silence the master gain
     if (this.ringingOsc1) {
@@ -338,6 +396,16 @@ export class AudioService {
       this.pendingAudio = null;
     }
 
+    // Claim a token so that if stopPlayback() is called during the async
+    // computeNormGain await, we know to bail out afterwards.
+    const myToken = ++this.tryAudioToken;
+
+    // Pre-compute normalization gain before loading the audio element
+    const normGain = await this.computeNormGain(src);
+
+    // Bail if stopPlayback() (or a newer tryAudioFile) ran while we were awaiting.
+    if (this.tryAudioToken !== myToken) return false;
+
     return new Promise((resolve) => {
       const audio = new Audio(src);
       this.pendingAudio = audio;
@@ -347,23 +415,41 @@ export class AudioService {
         if (this.pendingAudio === audio) this.pendingAudio = null;
       };
 
-      audio.oncanplaythrough = () => {
+      audio.oncanplaythrough = async () => {
         // If stopPlayback was called before this fired, abort silently
         if (this.pendingAudio !== audio) return;
         cleanup();
 
+        // Ensure the AudioContext is running — it can be auto-suspended after
+        // tab blur or between runs. Without this, audio routes through the Web
+        // Audio graph silently even though the HTML element itself plays.
+        if (this.audioContext && this.audioContext.state === 'suspended') {
+          await this.audioContext.resume();
+        }
+
         this.currentAudio = audio;
         if (this.audioContext) {
           const mediaSource = this.audioContext.createMediaElementSource(audio);
+          this.currentMediaSource = mediaSource;
           this.currentAudioGain = this.audioContext.createGain();
-          this.currentAudioGain.gain.value = this.sounds.promptVolume;
+          this.currentAudioGain.gain.value = this.sounds.promptVolume * normGain;
           const chain = this.buildTelephoneChain();
           mediaSource.connect(this.currentAudioGain);
           this.currentAudioGain.connect(chain.input);
           chain.output.connect(this.audioContext.destination);
         }
-        audio.onended = () => { this.currentAudio = null; this.currentAudioGain = null; onEnded?.(); };
-        audio.onerror = () => { this.currentAudio = null; this.currentAudioGain = null; resolve(false); };
+        audio.onended = () => {
+          this.currentAudio = null;
+          this.currentAudioGain = null;
+          this.currentMediaSource = null;
+          onEnded?.();
+        };
+        audio.onerror = () => {
+          this.currentAudio = null;
+          this.currentAudioGain = null;
+          this.currentMediaSource = null;
+          resolve(false);
+        };
         audio.play().then(() => resolve(true)).catch(() => resolve(false));
       };
 
