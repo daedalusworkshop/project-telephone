@@ -5,15 +5,10 @@ import { execFile } from 'child_process';
 
 const app = express();
 const PORT = 3001;
-const RECORDINGS_DIR = path.join(process.cwd(), 'recordings');
-
-if (!fs.existsSync(RECORDINGS_DIR)) {
-  fs.mkdirSync(RECORDINGS_DIR, { recursive: true });
-}
 
 app.use((_, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Recording-Time');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Recording-Time, X-Recording-Folder');
   next();
 });
 app.options('/api/recordings', (_, res) => res.sendStatus(204));
@@ -25,8 +20,14 @@ app.post('/api/recordings', (req, res) => {
   const timestamp = typeof clientTime === 'string' && /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$/.test(clientTime)
     ? clientTime
     : new Date().toISOString().replace(/[:.]/g, '-');
+
+  const rawFolder = req.headers['x-recording-folder'];
+  const folder = typeof rawFolder === 'string' && /^[\w-]+$/.test(rawFolder) ? rawFolder : 'operator';
+  const recordingsDir = path.join(process.cwd(), folder);
+  if (!fs.existsSync(recordingsDir)) fs.mkdirSync(recordingsDir, { recursive: true });
+
   const filename = `recording-${timestamp}.webm`;
-  const filepath = path.join(RECORDINGS_DIR, filename);
+  const filepath = path.join(recordingsDir, filename);
 
   fs.writeFile(filepath, req.body, (err) => {
     if (err) {
@@ -34,11 +35,16 @@ app.post('/api/recordings', (req, res) => {
       res.status(500).json({ error: 'Failed to save' });
       return;
     }
-    console.log(`Saved: ${filename}`);
     const wavFilepath = filepath.replace(/\.webm$/, '.wav');
     execFile('/opt/homebrew/bin/ffmpeg', ['-i', filepath, wavFilepath], (ffErr) => {
-      if (ffErr) console.error('Failed to convert to WAV:', ffErr.message);
-      else console.log(`Converted: ${path.basename(wavFilepath)}`);
+      if (ffErr) {
+        console.error('Failed to convert to WAV:', ffErr.message);
+      } else {
+        console.log(`Saved: ${folder}/${path.basename(wavFilepath)}`);
+        fs.unlink(filepath, (unlinkErr) => {
+          if (unlinkErr) console.error('Failed to delete .webm:', unlinkErr.message);
+        });
+      }
     });
     res.json({ filename });
   });
@@ -46,5 +52,4 @@ app.post('/api/recordings', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`Recordings saved to: ${RECORDINGS_DIR}`);
 });
