@@ -1,7 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { PromptConfig, PROMPTS, loadPromptId, savePromptId, getPrompt } from './prompts';
 import { motion, AnimatePresence } from 'motion/react';
 import { Leva, useControls, folder } from 'leva';
 import { audioService } from './services/audio';
+import { useCues } from './hooks/useCues';
 
 const STORAGE_KEY = 'telephone-dsp';
 const FONT_KEY = 'telephone-font';
@@ -73,7 +75,9 @@ function saveDSP(key: keyof typeof DSP_DEFAULTS, value: number) {
 type AppState =
   | 'START'
   | 'OATH'
-  | 'CALL'
+  | 'CALL_WELCOME'
+  | 'CALL_RINGING'
+  | 'CALL_PROMPT'
   | 'RECORDING'
   | 'POST_RECORDING'
   | 'PLAYBACK'
@@ -83,10 +87,12 @@ type AppState =
   | 'ERROR';
 
 const TIMELINE_STEPS: Array<{ state: AppState; label: string }> = [
-  { state: 'START',          label: 'start' },
-  { state: 'OATH',           label: 'oath'  },
-  { state: 'CALL',           label: 'call'  },
-  { state: 'RECORDING',      label: 'rec'   },
+  { state: 'START',          label: 'start'   },
+  { state: 'OATH',           label: 'oath'    },
+  { state: 'CALL_WELCOME',   label: 'welcome' },
+  { state: 'CALL_RINGING',   label: 'ring'    },
+  { state: 'CALL_PROMPT',    label: 'prompt'  },
+  { state: 'RECORDING',      label: 'rec'     },
   { state: 'POST_RECORDING', label: 'post'  },
   { state: 'PLAYBACK',       label: 'play'  },
   { state: 'SEND_EXIT',      label: 'send'  },
@@ -125,6 +131,26 @@ function DevTimeline({ current, onJump }: { current: AppState; onJump: (s: AppSt
         })}
       </div>
     </div>
+  );
+}
+
+function CueOverlay({ mdSrc }: { mdSrc: string | null }) {
+  const text = useCues(mdSrc);
+  return (
+    <AnimatePresence mode="wait">
+      {text && (
+        <motion.p
+          key={text}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 1.5 }}
+          className="absolute inset-0 flex items-center justify-center text-xl tracking-wide text-white/80 pointer-events-none z-10 px-8 text-center"
+        >
+          {text}
+        </motion.p>
+      )}
+    </AnimatePresence>
   );
 }
 
@@ -256,7 +282,44 @@ function OathScreen({ onNext }: { key?: string, onNext: () => void }) {
   );
 }
 
-function CallScreen({ onComplete, onShowQuestion }: { key?: string, onComplete: () => void, onShowQuestion: () => void }) {
+function CallWelcomeScreen({ prompt, onComplete }: { key?: string, prompt: PromptConfig, onComplete: () => void }) {
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
+  useEffect(() => {
+    let isMounted = true;
+    audioService.speak(
+      prompt.welcome.tts,
+      () => setTimeout(() => { if (isMounted) onCompleteRef.current(); }, 800),
+      prompt.welcome.mp3
+    );
+    return () => { isMounted = false; audioService.stopPlayback(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0">
+      <CueOverlay mdSrc={prompt.welcome.content} />
+    </motion.div>
+  );
+}
+
+function CallRingingScreen({ onComplete }: { key?: string, onComplete: () => void }) {
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
+
+  useEffect(() => {
+    let isMounted = true;
+    audioService.playRinging(15000, () => { if (isMounted) onCompleteRef.current(); });
+    return () => { isMounted = false; audioService.stopPlayback(); };
+  }, []);
+
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0" />
+  );
+}
+
+function CallPromptScreen({ prompt, onComplete, onShowQuestion }: { key?: string, prompt: PromptConfig, onComplete: () => void, onShowQuestion: () => void }) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
   const onShowQuestionRef = useRef(onShowQuestion);
@@ -264,51 +327,23 @@ function CallScreen({ onComplete, onShowQuestion }: { key?: string, onComplete: 
 
   useEffect(() => {
     let isMounted = true;
-    let showQuestionTimer: ReturnType<typeof setTimeout>;
-
-    const runSequence = async () => {
-      // 1. Intro voice
-      await new Promise<void>(resolve => {
-        audioService.speak(
-          "Hello, welcome. Please wait while I connect you with your operator. She can direct your call to anyone in the world.",
-          () => setTimeout(resolve, 800),
-          '/audio/welcome.mp3'
-        );
-      });
-      if (!isMounted) return;
-
-      // 2. Ringing (~15s)
-      await new Promise<void>(resolve => {
-        audioService.playRinging(15000, resolve);
-      });
-      if (!isMounted) return;
-
-      // 3. Show question 7s after ring ends, then play prompt audio
-      showQuestionTimer = setTimeout(() => {
-        if (isMounted) onShowQuestionRef.current();
-      }, 7000);
-
-      await new Promise<void>(resolve => {
-        audioService.speak(
-          "The operator isn't available right now. She is asking: who do you wish to call? What do you need the most right now? Please leave your message after the tone. She'll find a way to reach you.",
-          () => setTimeout(resolve, 1500),
-          '/audio/prompt.mp3'
-        );
-      });
-
-      if (isMounted) onCompleteRef.current();
-    };
-
-    runSequence();
-    return () => {
-      isMounted = false;
-      clearTimeout(showQuestionTimer);
-      audioService.stopPlayback();
-    };
+    const showQuestionTimer = setTimeout(() => {
+      if (isMounted) onShowQuestionRef.current();
+    }, 7000);
+    audioService.speak(
+      prompt.prompt.tts,
+      () => { if (isMounted) onCompleteRef.current(); },
+      prompt.prompt.mp3
+    );
+    return () => { isMounted = false; clearTimeout(showQuestionTimer); audioService.stopPlayback(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0" />;
+  return (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0">
+      <CueOverlay mdSrc={prompt.prompt.content} />
+    </motion.div>
+  );
 }
 
 function RecordingScreen({ onHangup }: { key?: string, onHangup: () => void }) {
@@ -325,7 +360,7 @@ function RecordingScreen({ onHangup }: { key?: string, onHangup: () => void }) {
         audioService.setSidetone(true);
         audioService.startRecording();
       });
-    }, 1000);
+    }, 500);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space') {
@@ -408,18 +443,18 @@ function PlaybackScreen({ onComplete }: { key?: string, onComplete: () => void }
   return <div className="absolute inset-0 bg-black" />;
 }
 
-function SendExitScreen({ onComplete }: { key?: string, onComplete: () => void }) {
+function SendExitScreen({ prompt, onComplete }: { key?: string, prompt: PromptConfig, onComplete: () => void }) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
   useEffect(() => {
     let isMounted = true;
-    audioService.uploadRecording().catch(() => {});
-    audioService.speak("Thank you. The operator will find a way to reach you.", () => {
+    audioService.uploadRecording(prompt.recordingsFolder).catch(() => {});
+    audioService.speak(prompt.thankYou.tts, () => {
       setTimeout(() => {
         if (isMounted) onCompleteRef.current();
       }, 2000);
-    }, '/audio/thank-you.mp3');
+    }, prompt.thankYou.mp3);
     return () => { isMounted = false; };
   }, []);
 
@@ -429,24 +464,24 @@ function SendExitScreen({ onComplete }: { key?: string, onComplete: () => void }
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 2 }}
-      className="absolute inset-0 flex flex-col items-center justify-center text-center px-8"
+      className="absolute inset-0"
     >
-      <p className="text-xl tracking-wide text-white/80">Thank you. The operator will find a way to reach you.</p>
+      <CueOverlay mdSrc={prompt.thankYou.content} />
     </motion.div>
   );
 }
 
-function DiscardExitScreen({ onComplete }: { key?: string, onComplete: () => void }) {
+function DiscardExitScreen({ prompt, onComplete }: { key?: string, prompt: PromptConfig, onComplete: () => void }) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
   useEffect(() => {
     let isMounted = true;
-    audioService.speak("May you be well. I'll be here if you need me.", () => {
+    audioService.speak(prompt.farewell.tts, () => {
       setTimeout(() => {
         if (isMounted) onCompleteRef.current();
       }, 2000);
-    }, '/audio/farewell.mp3');
+    }, prompt.farewell.mp3);
     return () => { isMounted = false; };
   }, []);
 
@@ -456,10 +491,9 @@ function DiscardExitScreen({ onComplete }: { key?: string, onComplete: () => voi
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 2 }}
-      className="absolute inset-0 flex flex-col items-center justify-center text-center px-8 space-y-4"
+      className="absolute inset-0"
     >
-      <p className="text-xl tracking-wide text-white/80">May you be well.</p>
-      <p className="text-xl tracking-wide text-white/80">I'll be here if you need me.</p>
+      <CueOverlay mdSrc={prompt.farewell.content} />
     </motion.div>
   );
 }
@@ -494,6 +528,8 @@ function ErrorScreen({ key }: { key?: string }) {
 export default function App() {
   const [state, setState] = useState<AppState>('START');
   const [panelVisible, setPanelVisible] = useState(false);
+  const [promptId, setPromptId] = useState(loadPromptId);
+  const activePrompt = getPrompt(promptId);
 
   const jumpToState = (next: AppState) => {
     audioService.stopPlayback();
@@ -505,7 +541,7 @@ export default function App() {
   const [hintVisible, setHintVisible] = useState(false);
 
   useEffect(() => {
-    if (state !== 'CALL' && state !== 'RECORDING') {
+    if (state !== 'CALL_PROMPT' && state !== 'RECORDING') {
       setQuestionVisible(false);
     }
     setHintVisible(state === 'RECORDING');
@@ -528,6 +564,15 @@ export default function App() {
 
   useControls({
     'Appearance': folder({
+      prompt: {
+        label: 'Prompt',
+        value: loadPromptId(),
+        options: Object.fromEntries(PROMPTS.map(p => [p.label, p.id])),
+        onChange: (id: string) => {
+          setPromptId(id);
+          savePromptId(id);
+        },
+      },
       font: {
         label: 'Font',
         value: loadFontName(),
@@ -708,7 +753,7 @@ export default function App() {
             transition={{ duration: 4, ease: 'easeIn' }}
             className="absolute inset-0 flex items-center justify-center text-xl tracking-wide text-white/80 pointer-events-none z-10"
           >
-            What do you need the most right now?
+            {activePrompt.prompt.question}
           </motion.p>
         )}
         {hintVisible && (
@@ -729,10 +774,16 @@ export default function App() {
           <StartScreen key="start" onNext={() => setState('OATH')} onError={() => setState('ERROR')} />
         )}
         {state === 'OATH' && (
-          <OathScreen key="oath" onNext={() => setState('CALL')} />
+          <OathScreen key="oath" onNext={() => setState('CALL_WELCOME')} />
         )}
-        {state === 'CALL' && (
-          <CallScreen key="call" onComplete={() => setState('RECORDING')} onShowQuestion={() => setQuestionVisible(true)} />
+        {state === 'CALL_WELCOME' && (
+          <CallWelcomeScreen key="call_welcome" prompt={activePrompt} onComplete={() => setState('CALL_RINGING')} />
+        )}
+        {state === 'CALL_RINGING' && (
+          <CallRingingScreen key="call_ringing" onComplete={() => setState('CALL_PROMPT')} />
+        )}
+        {state === 'CALL_PROMPT' && (
+          <CallPromptScreen key="call_prompt" prompt={activePrompt} onComplete={() => setState('RECORDING')} onShowQuestion={() => setQuestionVisible(true)} />
         )}
         {state === 'RECORDING' && (
           <RecordingScreen key="recording" onHangup={() => setState('POST_RECORDING')} />
@@ -752,10 +803,10 @@ export default function App() {
           <PlaybackScreen key="playback" onComplete={() => setState('POST_RECORDING')} />
         )}
         {state === 'SEND_EXIT' && (
-          <SendExitScreen key="send_exit" onComplete={() => setState('END')} />
+          <SendExitScreen key="send_exit" prompt={activePrompt} onComplete={() => setState('END')} />
         )}
         {state === 'DISCARD_EXIT' && (
-          <DiscardExitScreen key="discard_exit" onComplete={() => setState('END')} />
+          <DiscardExitScreen key="discard_exit" prompt={activePrompt} onComplete={() => setState('END')} />
         )}
         {state === 'END' && (
           <EndScreen key="end" onReset={() => setState('START')} />
