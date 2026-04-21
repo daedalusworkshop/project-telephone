@@ -4,17 +4,14 @@ import { motion, AnimatePresence } from 'motion/react';
 type Recording = { label: string; src: string; cues?: string };
 
 const FEATURED: Recording[] = [
-  { label: 'Ben',     src: '/operator/recordings/!! ben.wav',                                      cues: 'ben' },
   { label: 'Gabriel', src: '/operator/recordings/!! gabriel (recording-2026-02-28_22-05-04).wav',  cues: 'gabriel' },
-  { label: 'Kess',    src: '/operator/recordings/!! kess.wav',                                     cues: 'kess' },
+  { label: 'Ben',     src: '/operator/recordings/!! ben.wav',                                      cues: 'ben' },
   { label: 'Wren',    src: '/operator/recordings/!! wren.wav',                                     cues: 'wren' },
 ];
 
 const MORE: Recording[] = [
-  { label: 'Indiria', src: '/operator/recordings/indiria.wav',                                     cues: 'indiria' },
-  { label: 'Reid',    src: '/operator/recordings/reid for owen.wav',                               cues: 'reid' },
+  { label: 'Kess',    src: '/operator/recordings/!! kess.wav',                                     cues: 'kess' },
   { label: 'Kate',    src: '/operator/recordings/kate (recording-2026-03-02_23-32-33).wav',        cues: 'kate' },
-  { label: 'Ibrahim', src: '/tomorrow/recordings/ibrahim.wav',                                     cues: 'ibrahim' },
   { label: 'Justin',  src: '/tomorrow/recordings/justin!.wav',                                     cues: 'justin' },
 ];
 
@@ -49,11 +46,15 @@ const QUESTION = 'What do you need the most right now?';
 
 // ── Sequential listen experience ──────────────────────────────────────────────
 
-function ListenSequence({ recordings, onClose }: {
+function ListenSequence({ recordings, moreRecordings, onClose }: {
   key?: React.Key;
   recordings: Recording[];
+  moreRecordings?: Recording[];
   onClose: () => void;
 }) {
+  type Phase = 'playing' | 'prompt' | 'more';
+  const [phase, setPhase] = useState<Phase>('playing');
+  const [playlist, setPlaylist] = useState(recordings);
   const [index, setIndex] = useState(0);
   const [blocks, setBlocks] = useState<CueBlock[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -61,17 +62,28 @@ function ListenSequence({ recordings, onClose }: {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const indexRef = useRef(index);
   indexRef.current = index;
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
 
-  const rec = recordings[index];
+  const rec = playlist[index];
 
   const advance = useCallback(() => {
+    if (phaseRef.current !== 'playing' && phaseRef.current !== 'more') return;
     const next = indexRef.current + 1;
-    if (next >= recordings.length) onClose();
-    else setIndex(next);
-  }, [recordings.length, onClose]);
+    if (next >= playlist.length) {
+      if (phaseRef.current === 'playing' && moreRecordings?.length) {
+        setPhase('prompt');
+      } else {
+        onClose();
+      }
+    } else {
+      setIndex(next);
+    }
+  }, [playlist.length, moreRecordings, onClose]);
 
-  // Load audio when index changes
+  // Load audio when index changes (not during prompt)
   useEffect(() => {
+    if (phase === 'prompt') return;
     setBlocks([]);
     setActiveIndex(-1);
     setProgress(0);
@@ -80,16 +92,16 @@ function ListenSequence({ recordings, onClose }: {
     audio.onended = advance;
     audio.play().catch(() => {});
     return () => { audio.pause(); audio.onended = null; audioRef.current = null; };
-  }, [index, advance]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [index, phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load cues
   useEffect(() => {
-    if (!rec.cues) return;
+    if (phase === 'prompt' || !rec?.cues) return;
     fetch(`/api/cues/${rec.cues}`)
       .then(r => r.ok ? r.text() : '')
       .then(md => { if (md) setBlocks(parseMd(md)); })
       .catch(() => {});
-  }, [rec.cues]);
+  }, [rec?.cues, phase]);
 
   // Track time → active cue + progress
   useEffect(() => {
@@ -112,12 +124,21 @@ function ListenSequence({ recordings, onClose }: {
   // Keyboard
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.code === 'Space') { e.preventDefault(); advance(); }
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (phaseRef.current === 'prompt') {
+          setPhase('more');
+          setPlaylist(moreRecordings!);
+          setIndex(0);
+        } else {
+          advance();
+        }
+      }
       if (e.key === 'Escape') onClose();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [advance, onClose]);
+  }, [advance, moreRecordings, onClose]);
 
   const seek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const audio = audioRef.current;
@@ -148,26 +169,39 @@ function ListenSequence({ recordings, onClose }: {
 
       <div className="flex-1 flex flex-col items-center justify-center px-16 gap-10">
         <AnimatePresence mode="wait">
-          <motion.p
-            key={rec.label}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 1 }}
-            className="text-5xl tracking-wide text-white text-center"
-          >
-            {rec.label}
-          </motion.p>
+          {phase === 'prompt' ? (
+            <motion.div
+              key="prompt"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1.2 }}
+              className="border border-white/20 px-12 py-6 text-center"
+            >
+              <p className="text-xl tracking-wide text-white/80 italic">press space to listen to more</p>
+            </motion.div>
+          ) : (
+            <motion.p
+              key={rec.label}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1 }}
+              className="text-5xl tracking-wide text-white text-center"
+            >
+              {rec.label}
+            </motion.p>
+          )}
         </AnimatePresence>
         <AnimatePresence mode="wait">
-          {activeText && (
+          {activeText && phase !== 'prompt' && (
             <motion.p
               key={activeText}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 1.5 }}
-              className="text-2xl leading-relaxed text-white/85 text-center tracking-wide max-w-xl"
+              className="text-2xl leading-relaxed text-white/75 text-center tracking-wide max-w-xl"
             >
               {activeText}
             </motion.p>
@@ -177,20 +211,22 @@ function ListenSequence({ recordings, onClose }: {
 
       <div className="px-10 pb-10 flex flex-col gap-3 shrink-0">
         <div className="flex justify-between items-baseline">
-          <span className="text-sm tracking-widest text-white/60 lowercase">Who do you wish to call? &nbsp;•&nbsp; {QUESTION}</span>
-          <span className="text-sm tracking-widest text-white/60 lowercase">space to skip</span>
+          <span className="text-sm tracking-widest text-white/45 lowercase">Who do you wish to call? &nbsp;•&nbsp; {QUESTION}</span>
+          <span className="text-sm tracking-widest text-white/45 lowercase">
+            {phase === 'prompt' ? 'space to play more' : 'space to skip'}
+          </span>
         </div>
         <div
           className="w-full h-px bg-white/10 relative cursor-pointer group"
-          onClick={seek}
+          onClick={phase !== 'prompt' ? seek : undefined}
         >
           <div
-            className="h-px bg-white/40 transition-[width] duration-1000 ease-linear"
-            style={{ width: `${progress * 100}%` }}
+            className="h-px bg-white/35 transition-[width] duration-1000 ease-linear"
+            style={{ width: phase === 'prompt' ? '100%' : `${progress * 100}%` }}
           />
           <div
             className="absolute top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-white/50 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity"
-            style={{ left: `${progress * 100}%` }}
+            style={{ left: phase === 'prompt' ? '100%' : `${progress * 100}%` }}
           />
         </div>
       </div>
@@ -514,7 +550,7 @@ export default function Portfolio() {
         >
           <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the question</p>
           <p className="text-2xl tracking-wide text-white/90 italic">
-            {QUESTION}
+            {QUESTION} Who do you wish to call?
           </p>
         </motion.div>
 
@@ -524,11 +560,15 @@ export default function Portfolio() {
           transition={{ duration: 2, delay: 1.8 }}
           className="mb-24"
         >
+          <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the recordings</p>
           <button
             onClick={() => setListening(true)}
-            className="text-xl tracking-wide text-white hover:text-white/70 transition-colors duration-500 cursor-pointer italic"
+            className="group text-2xl tracking-wide text-white/90 hover:text-white/70 transition-colors duration-500 cursor-pointer italic relative"
           >
-            Hear their answers
+            <span className="relative">
+              Hear their answers
+              <span className="absolute left-0 -bottom-0.5 h-px w-0 bg-white/50 group-hover:w-full transition-all duration-250 ease-in-out" />
+            </span>
           </button>
         </motion.div>
 
@@ -539,6 +579,7 @@ export default function Portfolio() {
           <ListenSequence
             key="listen"
             recordings={FEATURED}
+            moreRecordings={MORE}
             onClose={() => setListening(false)}
           />
         )}
