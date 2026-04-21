@@ -158,7 +158,10 @@ function ListenSequence({ recordings, moreRecordings, onClose }: {
       className="fixed inset-0 z-50 bg-black flex flex-col"
       style={{ fontFamily: '"Lora", ui-serif, serif' }}
     >
-      <div className="flex justify-end items-start px-10 pt-10 shrink-0">
+      <div className="flex justify-between items-start px-10 pt-10 shrink-0">
+        <p className="text-sm leading-relaxed text-white/60 italic max-w-xs">
+          To bring out the soulful blues we feel, every day. To give it a shared voice. To share it is to say it's okay.
+        </p>
         <button
           onClick={onClose}
           className="text-sm tracking-widest text-white/25 hover:text-white/60 transition-colors duration-300 lowercase cursor-pointer"
@@ -187,7 +190,7 @@ function ListenSequence({ recordings, moreRecordings, onClose }: {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 1 }}
-              className="text-5xl tracking-wide text-white text-center"
+              className="text-5xl tracking-wide text-white/80 text-center"
             >
               {rec.label}
             </motion.p>
@@ -537,6 +540,7 @@ export default function Portfolio() {
           transition={{ duration: 2, delay: 1.2 }}
           className="mb-20 space-y-5"
         >
+          <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the idea</p>
           <p className="text-2xl leading-relaxed text-white/90 italic">
             An honest installation. A telephone booth on a college drillfield. Pick up a telephone &amp; leave a message.
           </p>
