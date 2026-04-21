@@ -81,10 +81,13 @@ type AppState =
   | 'RECORDING'
   | 'POST_RECORDING'
   | 'PLAYBACK'
+  | 'PERMISSION'
   | 'SEND_EXIT'
   | 'DISCARD_EXIT'
   | 'END'
   | 'ERROR';
+
+type Permission = 'yes' | 'anonymous' | 'no';
 
 const TIMELINE_STEPS: Array<{ state: AppState; label: string }> = [
   { state: 'START',          label: 'start'   },
@@ -95,6 +98,7 @@ const TIMELINE_STEPS: Array<{ state: AppState; label: string }> = [
   { state: 'RECORDING',      label: 'rec'     },
   { state: 'POST_RECORDING', label: 'post'  },
   { state: 'PLAYBACK',       label: 'play'  },
+  { state: 'PERMISSION',     label: 'perm'  },
   { state: 'SEND_EXIT',      label: 'send'  },
   { state: 'DISCARD_EXIT',   label: 'disc'  },
   { state: 'END',            label: 'end'   },
@@ -182,7 +186,7 @@ function StartScreen({ onNext, onError }: { key?: string, onNext: () => void, on
       className="absolute inset-0"
     >
       <div className="absolute inset-0 flex items-center justify-center">
-        <p className="text-xl tracking-wide text-white/80">Please pick up the telephone.</p>
+        <p className="text-xl tracking-wide text-white/80 max-w-lg text-center leading-relaxed">An honest installation. A telephone booth on a college drillfield. Pick up a telephone &amp; leave a message.</p>
       </div>
       <AnimatePresence>
         {showNext && (
@@ -319,30 +323,31 @@ function CallRingingScreen({ onComplete }: { key?: string, onComplete: () => voi
   );
 }
 
-function CallPromptScreen({ prompt, onComplete, onShowQuestion }: { key?: string, prompt: PromptConfig, onComplete: () => void, onShowQuestion: () => void }) {
+function CallPromptScreen({ prompt, onComplete, onCueText }: { key?: string, prompt: PromptConfig, onComplete: () => void, onCueText: (text: string) => void }) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
-  const onShowQuestionRef = useRef(onShowQuestion);
-  onShowQuestionRef.current = onShowQuestion;
+  const onCueTextRef = useRef(onCueText);
+  onCueTextRef.current = onCueText;
+
+  const cueText = useCues(prompt.prompt.content);
+
+  useEffect(() => {
+    onCueTextRef.current(cueText);
+  }, [cueText]);
 
   useEffect(() => {
     let isMounted = true;
-    const showQuestionTimer = setTimeout(() => {
-      if (isMounted) onShowQuestionRef.current();
-    }, 7000);
     audioService.speak(
       prompt.prompt.tts,
       () => { if (isMounted) onCompleteRef.current(); },
       prompt.prompt.mp3
     );
-    return () => { isMounted = false; clearTimeout(showQuestionTimer); audioService.stopPlayback(); };
+    return () => { isMounted = false; audioService.stopPlayback(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0">
-      <CueOverlay mdSrc={prompt.prompt.content} />
-    </motion.div>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 2 }} className="absolute inset-0" />
   );
 }
 
@@ -353,14 +358,11 @@ function RecordingScreen({ onHangup }: { key?: string, onHangup: () => void }) {
   useEffect(() => {
     let isMounted = true;
 
-    const beepTimeout = setTimeout(() => {
+    audioService.playBeep(() => {
       if (!isMounted) return;
-      audioService.playBeep(() => {
-        if (!isMounted) return;
-        audioService.setSidetone(true);
-        audioService.startRecording();
-      });
-    }, 500);
+      audioService.setSidetone(true);
+      audioService.startRecording();
+    });
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space') {
@@ -374,7 +376,6 @@ function RecordingScreen({ onHangup }: { key?: string, onHangup: () => void }) {
     window.addEventListener('keydown', handleKeyDown);
     return () => {
       isMounted = false;
-      clearTimeout(beepTimeout);
       window.removeEventListener('keydown', handleKeyDown);
       audioService.stopRecording();
     };
@@ -443,13 +444,58 @@ function PlaybackScreen({ onComplete }: { key?: string, onComplete: () => void }
   return <div className="absolute inset-0 bg-black" />;
 }
 
-function SendExitScreen({ prompt, onComplete }: { key?: string, prompt: PromptConfig, onComplete: () => void }) {
+function PermissionScreen({ onAction }: { key?: string, onAction: (p: Permission) => void }) {
+  const [showOptions, setShowOptions] = useState(false);
+  const onActionRef = useRef(onAction);
+  onActionRef.current = onAction;
+
+  useEffect(() => {
+    const t = setTimeout(() => setShowOptions(true), 800);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === '1') onActionRef.current('yes');
+      if (e.key === '2') onActionRef.current('anonymous');
+      if (e.key === '3') onActionRef.current('no');
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center">
+      <AnimatePresence>
+        {showOptions && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 2 }}
+            className="flex flex-col space-y-8 text-white/60 max-w-lg px-8 text-center"
+          >
+            <p className="text-xl tracking-wide leading-relaxed">
+              I give permission for this recording to be heard, shared, or used in demonstrations of this work.
+            </p>
+            <div className="flex flex-col space-y-4 text-xl tracking-widest">
+              <div className="flex space-x-8 justify-center"><span className="w-4 text-right">1</span><span>Yes</span></div>
+              <div className="flex space-x-8 justify-center"><span className="w-4 text-right">2</span><span>Yes, keep me anonymous</span></div>
+              <div className="flex space-x-8 justify-center"><span className="w-4 text-right">3</span><span>No</span></div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function SendExitScreen({ prompt, permission, onComplete }: { key?: string, prompt: PromptConfig, permission: Permission, onComplete: () => void }) {
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
   useEffect(() => {
     let isMounted = true;
-    audioService.uploadRecording(prompt.recordingsFolder).catch(() => {});
+    audioService.uploadRecording(prompt.recordingsFolder, permission).catch(() => {});
     audioService.speak(prompt.thankYou.tts, () => {
       setTimeout(() => {
         if (isMounted) onCompleteRef.current();
@@ -527,6 +573,7 @@ function ErrorScreen({ key }: { key?: string }) {
 
 export default function App() {
   const [state, setState] = useState<AppState>('START');
+  const [permission, setPermission] = useState<Permission>('yes');
   const [panelVisible, setPanelVisible] = useState(false);
   const [promptId, setPromptId] = useState(loadPromptId);
   const activePrompt = getPrompt(promptId);
@@ -537,12 +584,21 @@ export default function App() {
     audioService.setSidetone(false);
     setState(next);
   };
-  const [questionVisible, setQuestionVisible] = useState(false);
+  const [activeCue, setActiveCue] = useState('');
   const [hintVisible, setHintVisible] = useState(false);
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  const handleCueText = useCallback((text: string) => {
+    // When CallPromptScreen unmounts its useCues cleanup fires with '', ignore it
+    // so the last cue stays visible through RECORDING state.
+    if (stateRef.current === 'RECORDING' && text === '') return;
+    setActiveCue(text);
+  }, []);
 
   useEffect(() => {
     if (state !== 'CALL_PROMPT' && state !== 'RECORDING') {
-      setQuestionVisible(false);
+      setActiveCue('');
     }
     setHintVisible(state === 'RECORDING');
   }, [state]);
@@ -743,19 +799,21 @@ export default function App() {
     <Leva hidden={!panelVisible} />
     {panelVisible && <DevTimeline current={state} onJump={jumpToState} />}
     <div className="fixed inset-0 bg-black text-white/90 font-serif selection:bg-white/10 cursor-default">
-      <AnimatePresence>
-        {questionVisible && (
+      <AnimatePresence mode="wait">
+        {activeCue && (
           <motion.p
-            key="question"
+            key={activeCue}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 4, ease: 'easeIn' }}
-            className="absolute inset-0 flex items-center justify-center text-xl tracking-wide text-white/80 pointer-events-none z-10"
+            transition={{ duration: 1.5 }}
+            className="absolute inset-0 flex items-center justify-center text-xl tracking-wide text-white/80 pointer-events-none z-10 px-8 text-center"
           >
-            {activePrompt.prompt.question}
+            {activeCue}
           </motion.p>
         )}
+      </AnimatePresence>
+      <AnimatePresence>
         {hintVisible && (
           <motion.p
             key="hint"
@@ -783,7 +841,7 @@ export default function App() {
           <CallRingingScreen key="call_ringing" onComplete={() => setState('CALL_PROMPT')} />
         )}
         {state === 'CALL_PROMPT' && (
-          <CallPromptScreen key="call_prompt" prompt={activePrompt} onComplete={() => setState('RECORDING')} onShowQuestion={() => setQuestionVisible(true)} />
+          <CallPromptScreen key="call_prompt" prompt={activePrompt} onComplete={() => setState('RECORDING')} onCueText={handleCueText} />
         )}
         {state === 'RECORDING' && (
           <RecordingScreen key="recording" onHangup={() => setState('POST_RECORDING')} />
@@ -794,7 +852,7 @@ export default function App() {
             onAction={(action) => {
               if (action === 1) setState('RECORDING');
               if (action === 2) setState('PLAYBACK');
-              if (action === 3) setState('SEND_EXIT');
+              if (action === 3) setState('PERMISSION');
               if (action === 4) setState('DISCARD_EXIT');
             }}
           />
@@ -802,8 +860,11 @@ export default function App() {
         {state === 'PLAYBACK' && (
           <PlaybackScreen key="playback" onComplete={() => setState('POST_RECORDING')} />
         )}
+        {state === 'PERMISSION' && (
+          <PermissionScreen key="permission" onAction={(p) => { setPermission(p); setState('SEND_EXIT'); }} />
+        )}
         {state === 'SEND_EXIT' && (
-          <SendExitScreen key="send_exit" prompt={activePrompt} onComplete={() => setState('END')} />
+          <SendExitScreen key="send_exit" prompt={activePrompt} permission={permission} onComplete={() => setState('END')} />
         )}
         {state === 'DISCARD_EXIT' && (
           <DiscardExitScreen key="discard_exit" prompt={activePrompt} onComplete={() => setState('END')} />

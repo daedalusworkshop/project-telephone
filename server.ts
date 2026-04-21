@@ -8,10 +8,30 @@ const PORT = 3001;
 
 app.use((_, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Recording-Time, X-Recording-Folder');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Recording-Time, X-Recording-Folder, X-Recording-Permission');
   next();
 });
-app.options('/api/recordings', (_, res) => res.sendStatus(204));
+app.options('*', (_, res) => res.sendStatus(204));
+
+app.use(express.text({ type: 'text/plain' }));
+
+const CUES_DIR = path.join(process.cwd(), 'public', 'cues');
+
+app.get('/api/cues/:name', (req, res) => {
+  const name = req.params.name.replace(/[^a-z0-9_-]/gi, '');
+  const file = path.join(CUES_DIR, `${name}.md`);
+  if (!fs.existsSync(file)) { res.status(404).send(''); return; }
+  res.type('text/plain').send(fs.readFileSync(file, 'utf8'));
+});
+
+app.put('/api/cues/:name', (req, res) => {
+  const name = req.params.name.replace(/[^a-z0-9_-]/gi, '');
+  const file = path.join(CUES_DIR, `${name}.md`);
+  if (!fs.existsSync(CUES_DIR)) fs.mkdirSync(CUES_DIR, { recursive: true });
+  fs.writeFileSync(file, req.body as string, 'utf8');
+  res.sendStatus(204);
+});
 
 app.use(express.raw({ type: 'audio/*', limit: '50mb' }));
 
@@ -23,10 +43,13 @@ app.post('/api/recordings', (req, res) => {
 
   const rawFolder = req.headers['x-recording-folder'];
   const folder = typeof rawFolder === 'string' && /^[\w-]+$/.test(rawFolder) ? rawFolder : 'operator';
-  const recordingsDir = path.join(process.cwd(), folder);
+  const recordingsDir = path.join(process.cwd(), 'public', folder, 'recordings');
   if (!fs.existsSync(recordingsDir)) fs.mkdirSync(recordingsDir, { recursive: true });
 
-  const filename = `recording-${timestamp}.webm`;
+  const rawPermission = req.headers['x-recording-permission'];
+  const permission = rawPermission === 'anonymous' ? 'anonymous' : rawPermission === 'no' ? 'no-consent' : 'consent';
+
+  const filename = `recording-${timestamp}-${permission}.webm`;
   const filepath = path.join(recordingsDir, filename);
 
   fs.writeFile(filepath, req.body, (err) => {

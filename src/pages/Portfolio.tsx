@@ -1,0 +1,536 @@
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
+import ExperiencePreview from './ExperiencePreview';
+
+type Recording = { label: string; src: string; cues?: string };
+
+const FEATURED: Recording[] = [
+  { label: 'Ben',     src: '/operator/recordings/!! ben.wav',                                      cues: 'ben' },
+  { label: 'Gabriel', src: '/operator/recordings/!! gabriel (recording-2026-02-28_22-05-04).wav',  cues: 'gabriel' },
+  { label: 'Kess',    src: '/operator/recordings/!! kess.wav',                                     cues: 'kess' },
+  { label: 'Wren',    src: '/operator/recordings/!! wren.wav',                                     cues: 'wren' },
+];
+
+const MORE: Recording[] = [
+  { label: 'Indiria', src: '/operator/recordings/indiria.wav',                                     cues: 'indiria' },
+  { label: 'Reid',    src: '/operator/recordings/reid for owen.wav',                               cues: 'reid' },
+  { label: 'Kate',    src: '/operator/recordings/kate (recording-2026-03-02_23-32-33).wav',        cues: 'kate' },
+  { label: 'Ibrahim', src: '/tomorrow/recordings/ibrahim.wav',                                     cues: 'ibrahim' },
+  { label: 'Justin',  src: '/tomorrow/recordings/justin!.wav',                                     cues: 'justin' },
+];
+
+// ── Cue helpers ───────────────────────────────────────────────────────────────
+
+type CueBlock = { time: string; text: string };
+
+function mssToSec(mss: string): number {
+  const m = mss.match(/^(\d+):(\d{2})$/);
+  return m ? parseInt(m[1]) * 60 + parseInt(m[2]) : NaN;
+}
+
+function secToMss(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function parseMd(md: string): CueBlock[] {
+  return md.trim().split(/\n\s*\n/).flatMap(block => {
+    const lines = block.trim().split('\n');
+    if (lines.length < 2) return [];
+    return [{ time: lines[0].trim(), text: lines.slice(1).join('\n').trim() }];
+  });
+}
+
+function blocksToMd(blocks: CueBlock[]): string {
+  return blocks.map(b => `${b.time}\n${b.text}`).join('\n\n') + '\n';
+}
+
+// ── Listening mode ────────────────────────────────────────────────────────────
+
+function ListeningMode({ rec, audio, onClose }: {
+  key?: React.Key;
+  rec: Recording;
+  audio: HTMLAudioElement;
+  onClose: () => void;
+}) {
+  const [blocks, setBlocks] = useState<CueBlock[]>([]);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [progress, setProgress] = useState(0);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'unsaved'>('saved');
+  const saveTimer = useRef<ReturnType<typeof setTimeout>>();
+  const activeBlockRef = useRef<HTMLDivElement>(null);
+
+  // Load cue file on mount
+  useEffect(() => {
+    if (!rec.cues) return;
+    fetch(`/api/cues/${rec.cues}`)
+      .then(r => r.ok ? r.text() : '')
+      .then(md => { if (md) setBlocks(parseMd(md)); })
+      .catch(() => {});
+  }, [rec.cues]);
+
+  // Track audio time → active index + progress
+  useEffect(() => {
+    const handler = () => {
+      const t = audio.currentTime;
+      setCurrentTime(t);
+      if (audio.duration) setProgress(t / audio.duration);
+      let idx = -1;
+      for (let i = 0; i < blocks.length; i++) {
+        const s = mssToSec(blocks[i].time);
+        if (!isNaN(s) && s <= t) idx = i;
+        else break;
+      }
+      setActiveIndex(idx);
+    };
+    audio.addEventListener('timeupdate', handler);
+    return () => audio.removeEventListener('timeupdate', handler);
+  }, [audio, blocks]);
+
+  // Auto-scroll editor to active block
+  useEffect(() => {
+    activeBlockRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [activeIndex]);
+
+  // ESC to close
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const saveBlocks = useCallback((next: CueBlock[]) => {
+    if (!rec.cues) return;
+    setSaveStatus('unsaved');
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      setSaveStatus('saving');
+      try {
+        await fetch(`/api/cues/${rec.cues}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'text/plain' },
+          body: blocksToMd(next),
+        });
+        setSaveStatus('saved');
+      } catch {
+        setSaveStatus('unsaved');
+      }
+    }, 1000);
+  }, [rec.cues]);
+
+  const updateTime = (i: number, time: string) => {
+    const next = blocks.map((b, idx) => idx === i ? { ...b, time } : b);
+    setBlocks(next);
+    saveBlocks(next);
+  };
+
+  const updateText = (i: number, text: string) => {
+    const next = blocks.map((b, idx) => idx === i ? { ...b, text } : b);
+    setBlocks(next);
+    saveBlocks(next);
+  };
+
+  const addBlock = () => {
+    const newBlock = { time: secToMss(Math.floor(currentTime)), text: '' };
+    // Insert after active index, or at end
+    const insertAt = activeIndex >= 0 ? activeIndex + 1 : blocks.length;
+    const next = [...blocks.slice(0, insertAt), newBlock, ...blocks.slice(insertAt)];
+    setBlocks(next);
+    saveBlocks(next);
+  };
+
+  const deleteBlock = (i: number) => {
+    const next = blocks.filter((_, idx) => idx !== i);
+    setBlocks(next);
+    saveBlocks(next);
+  };
+
+  const seek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    audio.currentTime = ((e.clientX - rect.left) / rect.width) * audio.duration;
+  }, [audio]);
+
+  const activeText = blocks[activeIndex]?.text ?? '';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 1.2 }}
+      className="fixed inset-0 z-50 flex"
+      style={{ fontFamily: '"Lora", ui-serif, serif' }}
+    >
+      {/* ── Left: listening panel ── */}
+      <div className="flex flex-col w-[45%] bg-black shrink-0">
+        {/* Header */}
+        <div className="flex justify-between items-start px-10 pt-10">
+          <span className="text-sm tracking-widest text-white/25 lowercase">{rec.label}</span>
+          <button
+            onClick={onClose}
+            className="text-sm tracking-widest text-white/25 hover:text-white/60 transition-colors duration-300 lowercase cursor-pointer"
+          >
+            esc
+          </button>
+        </div>
+
+        {/* Cue text */}
+        <div className="flex-1 flex items-center justify-center px-12">
+          <AnimatePresence mode="wait">
+            {activeText && (
+              <motion.p
+                key={activeText}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 1.5 }}
+                className="text-2xl leading-relaxed text-white/85 text-center tracking-wide"
+              >
+                {activeText}
+              </motion.p>
+            )}
+          </AnimatePresence>
+        </div>
+
+        {/* Footer */}
+        <div className="px-10 pb-10 flex items-center gap-4">
+          <div
+            className="flex-1 h-px bg-white/10 relative cursor-pointer group"
+            onClick={seek}
+          >
+            <div className="h-px bg-white/40" style={{ width: `${progress * 100}%` }} />
+            <div
+              className="absolute top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-white/50 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ left: `${progress * 100}%` }}
+            />
+          </div>
+          <button
+            onClick={() => { audio.currentTime = 0; }}
+            className="text-xs text-white/20 hover:text-white/50 transition-colors duration-300 cursor-pointer"
+          >
+            ↩
+          </button>
+        </div>
+      </div>
+
+      {/* ── Right: cue editor ── */}
+      <div className="flex flex-col flex-1 bg-[#080808] border-l border-white/[0.05]">
+        {/* Editor header */}
+        <div className="flex justify-between items-center px-6 py-4 border-b border-white/[0.05] shrink-0">
+          <span className="text-xs font-mono text-white/20">
+            {rec.cues ? `public/cues/${rec.cues}.md` : 'no cue file'}
+          </span>
+          <div className="flex items-center gap-4">
+            <span className="text-xs font-mono text-white/20 tabular-nums">
+              {secToMss(currentTime)}
+            </span>
+            <span className={`text-xs tracking-widest lowercase transition-colors duration-300 ${
+              saveStatus === 'saved' ? 'text-white/15' :
+              saveStatus === 'saving' ? 'text-white/30' :
+              'text-white/50'
+            }`}>
+              {saveStatus === 'saving' ? 'saving…' : saveStatus === 'unsaved' ? '●' : 'saved'}
+            </span>
+          </div>
+        </div>
+
+        {/* Cue blocks */}
+        <div className="flex-1 overflow-y-auto py-3">
+          {blocks.length === 0 && (
+            <p className="px-6 py-4 text-xs text-white/20 lowercase tracking-widest">
+              no cue file found — add blocks below
+            </p>
+          )}
+          {blocks.map((block, i) => {
+            const isActive = i === activeIndex;
+            return (
+              <div
+                key={i}
+                ref={isActive ? (el => { (activeBlockRef as React.MutableRefObject<HTMLDivElement | null>).current = el; }) : undefined}
+                className={`group flex gap-3 px-5 py-2.5 transition-colors duration-300 ${
+                  isActive ? 'bg-white/[0.06]' : 'hover:bg-white/[0.025]'
+                }`}
+              >
+                {/* Timestamp — click seeks to that time */}
+                <button
+                  onClick={() => {
+                    const s = mssToSec(block.time);
+                    if (!isNaN(s)) audio.currentTime = s;
+                  }}
+                  className="text-xs font-mono text-white/25 hover:text-white/60 transition-colors duration-200 shrink-0 w-9 text-left pt-0.5 cursor-pointer"
+                  title="Seek to this time"
+                >
+                  {block.time || '—'}
+                </button>
+
+                {/* Editable timestamp */}
+                <input
+                  value={block.time}
+                  onChange={e => updateTime(i, e.target.value)}
+                  placeholder="0:00"
+                  className="text-xs font-mono text-white/40 bg-transparent border-none outline-none shrink-0 w-10 pt-0.5 placeholder-white/15"
+                  spellCheck={false}
+                />
+
+                {/* Text */}
+                <textarea
+                  value={block.text}
+                  onChange={e => updateText(i, e.target.value)}
+                  rows={Math.max(1, block.text.split('\n').length)}
+                  className={`flex-1 bg-transparent border-none outline-none resize-none leading-relaxed text-sm transition-colors duration-300 ${
+                    isActive ? 'text-white/80' : 'text-white/35'
+                  }`}
+                  style={{ fontFamily: '"Lora", ui-serif, serif' }}
+                  spellCheck
+                />
+
+                {/* Delete */}
+                <button
+                  onClick={() => deleteBlock(i)}
+                  className="text-xs text-white/0 group-hover:text-white/25 hover:!text-white/60 transition-colors duration-200 cursor-pointer shrink-0 pt-0.5"
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })}
+
+          {/* Add block */}
+          {rec.cues && (
+            <button
+              onClick={addBlock}
+              className="flex items-center gap-3 px-5 py-3 w-full text-left text-xs text-white/15 hover:text-white/40 transition-colors duration-300 lowercase tracking-widest cursor-pointer"
+            >
+              <span className="font-mono w-9">{secToMss(Math.floor(currentTime))}</span>
+              <span>+ add cue at current time</span>
+            </button>
+          )}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ── Recording row ─────────────────────────────────────────────────────────────
+
+function RecordingRow({ rec, playing, onPlay }: {
+  key?: React.Key;
+  rec: Recording;
+  playing: boolean;
+  onPlay: (rec: Recording) => void;
+}) {
+  return (
+    <button
+      onClick={() => onPlay(rec)}
+      className="group flex items-center gap-4 w-full text-left py-3 transition-colors duration-300"
+    >
+      <span className={`text-sm transition-all duration-300 ${playing ? 'text-white' : 'text-white/35 group-hover:text-white/65'}`}>
+        {playing ? (
+          <motion.span
+            animate={{ opacity: [1, 0.3, 1] }}
+            transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut' }}
+            className="inline-block"
+          >
+            ▶
+          </motion.span>
+        ) : '▶'}
+      </span>
+      <span
+        className={`text-xl tracking-wide transition-colors duration-300 ${playing ? 'text-white' : 'text-white/70 group-hover:text-white/90'}`}
+        style={{ fontFamily: '"Lora", ui-serif, serif' }}
+      >
+        {rec.label}
+      </span>
+      {playing && (
+        <motion.span
+          className="ml-auto text-xs tracking-widest text-white/30 lowercase"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 1 }}
+        >
+          playing
+        </motion.span>
+      )}
+    </button>
+  );
+}
+
+// ── Portfolio page ────────────────────────────────────────────────────────────
+
+export default function Portfolio() {
+  const [playingRec, setPlayingRec] = useState<Recording | null>(null);
+  const [playingAudio, setPlayingAudio] = useState<HTMLAudioElement | null>(null);
+  const [showMore, setShowMore] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const handlePlay = (rec: Recording) => {
+    if (playingRec?.src === rec.src) {
+      audioRef.current?.pause();
+      audioRef.current = null;
+      setPlayingRec(null);
+      setPlayingAudio(null);
+      return;
+    }
+    audioRef.current?.pause();
+    const audio = new Audio(rec.src);
+    audio.onended = () => {
+      setPlayingRec(null);
+      setPlayingAudio(null);
+      audioRef.current = null;
+    };
+    audio.play();
+    audioRef.current = audio;
+    setPlayingRec(rec);
+    setPlayingAudio(audio);
+  };
+
+  const handleClose = useCallback(() => {
+    audioRef.current?.pause();
+    audioRef.current = null;
+    setPlayingRec(null);
+    setPlayingAudio(null);
+  }, []);
+
+  return (
+    <div
+      className="min-h-screen bg-black text-white/80 selection:bg-white/10"
+      style={{ fontFamily: '"Lora", ui-serif, serif' }}
+    >
+      <div className="max-w-2xl mx-auto px-8 py-24">
+
+        <motion.h1
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 2 }}
+          className="text-3xl tracking-wide text-white mb-2"
+        >
+          Project Telephone
+        </motion.h1>
+
+        <motion.p
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 2, delay: 0.5 }}
+          className="text-sm tracking-widest text-white/45 mb-16"
+        >
+          Spring • 2026
+        </motion.p>
+
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 2, delay: 1.2 }}
+          className="mb-20 space-y-5"
+        >
+          <p className="text-2xl leading-relaxed text-white/90 italic">
+            An honest installation. A telephone booth on a college drillfield. Pick up a telephone &amp; leave a message.
+          </p>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 2, delay: 1.5 }}
+          className="mb-16"
+        >
+          <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the question</p>
+          <p className="text-2xl tracking-wide text-white/90 italic">
+            What do you need the most right now?
+          </p>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 2, delay: 1.8 }}
+          className="mb-24"
+        >
+          <p className="text-xs tracking-widest text-white/45 lowercase mb-6">recordings</p>
+
+          <div className="divide-y divide-white/10">
+            {FEATURED.map(rec => (
+              <RecordingRow
+                key={rec.src}
+                rec={rec}
+                playing={playingRec?.src === rec.src}
+                onPlay={handlePlay}
+              />
+            ))}
+          </div>
+
+          <AnimatePresence>
+            {!showMore && (
+              <motion.button
+                initial={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.8 }}
+                onClick={() => setShowMore(true)}
+                className="mt-6 text-sm tracking-widest text-white/40 hover:text-white/70 transition-colors duration-300 lowercase cursor-pointer"
+              >
+                + more
+              </motion.button>
+            )}
+          </AnimatePresence>
+
+          <AnimatePresence>
+            {showMore && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 1, ease: 'easeInOut' }}
+                className="overflow-hidden"
+              >
+                <div className="divide-y divide-white/10 mt-0 border-t border-white/10">
+                  {MORE.map(rec => (
+                    <RecordingRow
+                      key={rec.src}
+                      rec={rec}
+                      playing={playingRec?.src === rec.src}
+                      onPlay={handlePlay}
+                    />
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
+
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 2, delay: 2 }}
+          className="flex justify-center pb-16"
+        >
+          <button
+            onClick={() => setShowPreview(true)}
+            className="text-sm tracking-widest text-white/40 hover:text-white/70 transition-colors duration-500 lowercase cursor-pointer"
+          >
+            [ preview the experience ]
+          </button>
+        </motion.div>
+
+      </div>
+
+      <AnimatePresence>
+        {playingRec && playingAudio && (
+          <ListeningMode
+            key={playingRec.src}
+            rec={playingRec}
+            audio={playingAudio}
+            onClose={handleClose}
+          />
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {showPreview && (
+          <ExperiencePreview onClose={() => setShowPreview(false)} />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

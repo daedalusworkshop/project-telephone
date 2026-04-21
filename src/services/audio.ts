@@ -50,6 +50,19 @@ export class AudioService {
   // tryAudioFile() call so that a stale call racing across an await knows to bail.
   private tryAudioToken = 0;
 
+  private timeListeners = new Set<(t: number) => void>();
+
+  subscribeTime(cb: (t: number) => void): () => void {
+    this.timeListeners.add(cb);
+    return () => this.timeListeners.delete(cb);
+  }
+
+  private attachTimeTracking(audio: HTMLAudioElement) {
+    audio.addEventListener('timeupdate', () => {
+      this.timeListeners.forEach(cb => cb(audio.currentTime));
+    });
+  }
+
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
   private recordingUrl: string | null = null;
@@ -428,6 +441,7 @@ export class AudioService {
         }
 
         this.currentAudio = audio;
+        this.attachTimeTracking(audio);
         if (this.audioContext) {
           const mediaSource = this.audioContext.createMediaElementSource(audio);
           this.currentMediaSource = mediaSource;
@@ -605,11 +619,13 @@ export class AudioService {
 
   // ── Upload ────────────────────────────────────────────────────────────────
 
-  async uploadRecording() {
+  async uploadRecording(folder: string, permission: 'yes' | 'anonymous' | 'no' = 'yes') {
     if (!this.recordedChunks.length) return;
     const blob = new Blob(this.recordedChunks, { type: 'audio/webm' });
     const headers: Record<string, string> = { 'Content-Type': 'audio/webm' };
     if (this.recordingTimestamp) headers['X-Recording-Time'] = this.recordingTimestamp;
+    headers['X-Recording-Folder'] = folder;
+    headers['X-Recording-Permission'] = permission;
     await fetch('http://localhost:3001/api/recordings', {
       method: 'POST',
       headers,
