@@ -1,6 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import ExperiencePreview from './ExperiencePreview';
 
 type Recording = { label: string; src: string; cues?: string };
 
@@ -46,7 +45,160 @@ function blocksToMd(blocks: CueBlock[]): string {
   return blocks.map(b => `${b.time}\n${b.text}`).join('\n\n') + '\n';
 }
 
-// ── Listening mode ────────────────────────────────────────────────────────────
+const QUESTION = 'What do you need the most right now?';
+
+// ── Sequential listen experience ──────────────────────────────────────────────
+
+function ListenSequence({ recordings, onClose }: {
+  key?: React.Key;
+  recordings: Recording[];
+  onClose: () => void;
+}) {
+  const [index, setIndex] = useState(0);
+  const [blocks, setBlocks] = useState<CueBlock[]>([]);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [progress, setProgress] = useState(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const indexRef = useRef(index);
+  indexRef.current = index;
+
+  const rec = recordings[index];
+
+  const advance = useCallback(() => {
+    const next = indexRef.current + 1;
+    if (next >= recordings.length) onClose();
+    else setIndex(next);
+  }, [recordings.length, onClose]);
+
+  // Load audio when index changes
+  useEffect(() => {
+    setBlocks([]);
+    setActiveIndex(-1);
+    setProgress(0);
+    const audio = new Audio(rec.src);
+    audioRef.current = audio;
+    audio.onended = advance;
+    audio.play().catch(() => {});
+    return () => { audio.pause(); audio.onended = null; audioRef.current = null; };
+  }, [index, advance]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load cues
+  useEffect(() => {
+    if (!rec.cues) return;
+    fetch(`/api/cues/${rec.cues}`)
+      .then(r => r.ok ? r.text() : '')
+      .then(md => { if (md) setBlocks(parseMd(md)); })
+      .catch(() => {});
+  }, [rec.cues]);
+
+  // Track time → active cue + progress
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const handler = () => {
+      if (audio.duration) setProgress(audio.currentTime / audio.duration);
+      let idx = -1;
+      for (let i = 0; i < blocks.length; i++) {
+        const s = mssToSec(blocks[i].time);
+        if (!isNaN(s) && s <= audio.currentTime) idx = i;
+        else break;
+      }
+      setActiveIndex(idx);
+    };
+    audio.addEventListener('timeupdate', handler);
+    return () => audio.removeEventListener('timeupdate', handler);
+  }, [blocks, index]);
+
+  // Keyboard
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.code === 'Space') { e.preventDefault(); advance(); }
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [advance, onClose]);
+
+  const seek = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    audio.currentTime = ((e.clientX - rect.left) / rect.width) * audio.duration;
+  }, []);
+
+  const activeText = blocks[activeIndex]?.text ?? '';
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 1.2 }}
+      className="fixed inset-0 z-50 bg-black flex flex-col"
+      style={{ fontFamily: '"Lora", ui-serif, serif' }}
+    >
+      <div className="flex justify-end items-start px-10 pt-10 shrink-0">
+        <button
+          onClick={onClose}
+          className="text-sm tracking-widest text-white/25 hover:text-white/60 transition-colors duration-300 lowercase cursor-pointer"
+        >
+          esc
+        </button>
+      </div>
+
+      <div className="flex-1 flex flex-col items-center justify-center px-16 gap-10">
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={rec.label}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 1 }}
+            className="text-5xl tracking-wide text-white text-center"
+          >
+            {rec.label}
+          </motion.p>
+        </AnimatePresence>
+        <AnimatePresence mode="wait">
+          {activeText && (
+            <motion.p
+              key={activeText}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1.5 }}
+              className="text-2xl leading-relaxed text-white/85 text-center tracking-wide max-w-xl"
+            >
+              {activeText}
+            </motion.p>
+          )}
+        </AnimatePresence>
+      </div>
+
+      <div className="px-10 pb-10 flex flex-col gap-3 shrink-0">
+        <div className="flex justify-between items-baseline">
+          <span className="text-sm tracking-widest text-white/60 lowercase">Who do you wish to call? &nbsp;•&nbsp; {QUESTION}</span>
+          <span className="text-sm tracking-widest text-white/60 lowercase">space to skip</span>
+        </div>
+        <div
+          className="w-full h-px bg-white/10 relative cursor-pointer group"
+          onClick={seek}
+        >
+          <div
+            className="h-px bg-white/40 transition-[width] duration-1000 ease-linear"
+            style={{ width: `${progress * 100}%` }}
+          />
+          <div
+            className="absolute top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-white/50 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity"
+            style={{ left: `${progress * 100}%` }}
+          />
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ── Listening mode (operator cue editor) ──────────────────────────────────────
 
 function ListeningMode({ rec, audio, onClose }: {
   key?: React.Key;
@@ -313,86 +465,10 @@ function ListeningMode({ rec, audio, onClose }: {
   );
 }
 
-// ── Recording row ─────────────────────────────────────────────────────────────
-
-function RecordingRow({ rec, playing, onPlay }: {
-  key?: React.Key;
-  rec: Recording;
-  playing: boolean;
-  onPlay: (rec: Recording) => void;
-}) {
-  return (
-    <button
-      onClick={() => onPlay(rec)}
-      className="group flex items-center gap-4 w-full text-left py-3 transition-colors duration-300"
-    >
-      <span className={`text-sm transition-all duration-300 ${playing ? 'text-white' : 'text-white/35 group-hover:text-white/65'}`}>
-        {playing ? (
-          <motion.span
-            animate={{ opacity: [1, 0.3, 1] }}
-            transition={{ duration: 1.6, repeat: Infinity, ease: 'easeInOut' }}
-            className="inline-block"
-          >
-            ▶
-          </motion.span>
-        ) : '▶'}
-      </span>
-      <span
-        className={`text-xl tracking-wide transition-colors duration-300 ${playing ? 'text-white' : 'text-white/70 group-hover:text-white/90'}`}
-        style={{ fontFamily: '"Lora", ui-serif, serif' }}
-      >
-        {rec.label}
-      </span>
-      {playing && (
-        <motion.span
-          className="ml-auto text-xs tracking-widest text-white/30 lowercase"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 1 }}
-        >
-          playing
-        </motion.span>
-      )}
-    </button>
-  );
-}
-
 // ── Portfolio page ────────────────────────────────────────────────────────────
 
 export default function Portfolio() {
-  const [playingRec, setPlayingRec] = useState<Recording | null>(null);
-  const [playingAudio, setPlayingAudio] = useState<HTMLAudioElement | null>(null);
-  const [showMore, setShowMore] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-
-  const handlePlay = (rec: Recording) => {
-    if (playingRec?.src === rec.src) {
-      audioRef.current?.pause();
-      audioRef.current = null;
-      setPlayingRec(null);
-      setPlayingAudio(null);
-      return;
-    }
-    audioRef.current?.pause();
-    const audio = new Audio(rec.src);
-    audio.onended = () => {
-      setPlayingRec(null);
-      setPlayingAudio(null);
-      audioRef.current = null;
-    };
-    audio.play();
-    audioRef.current = audio;
-    setPlayingRec(rec);
-    setPlayingAudio(audio);
-  };
-
-  const handleClose = useCallback(() => {
-    audioRef.current?.pause();
-    audioRef.current = null;
-    setPlayingRec(null);
-    setPlayingAudio(null);
-  }, []);
+  const [listening, setListening] = useState(false);
 
   return (
     <div
@@ -434,11 +510,11 @@ export default function Portfolio() {
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 2, delay: 1.5 }}
-          className="mb-16"
+          className="mb-20"
         >
           <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the question</p>
           <p className="text-2xl tracking-wide text-white/90 italic">
-            What do you need the most right now?
+            {QUESTION}
           </p>
         </motion.div>
 
@@ -448,89 +524,26 @@ export default function Portfolio() {
           transition={{ duration: 2, delay: 1.8 }}
           className="mb-24"
         >
-          <p className="text-xs tracking-widest text-white/45 lowercase mb-6">recordings</p>
-
-          <div className="divide-y divide-white/10">
-            {FEATURED.map(rec => (
-              <RecordingRow
-                key={rec.src}
-                rec={rec}
-                playing={playingRec?.src === rec.src}
-                onPlay={handlePlay}
-              />
-            ))}
-          </div>
-
-          <AnimatePresence>
-            {!showMore && (
-              <motion.button
-                initial={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.8 }}
-                onClick={() => setShowMore(true)}
-                className="mt-6 text-sm tracking-widest text-white/40 hover:text-white/70 transition-colors duration-300 lowercase cursor-pointer"
-              >
-                + more
-              </motion.button>
-            )}
-          </AnimatePresence>
-
-          <AnimatePresence>
-            {showMore && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
-                exit={{ opacity: 0, height: 0 }}
-                transition={{ duration: 1, ease: 'easeInOut' }}
-                className="overflow-hidden"
-              >
-                <div className="divide-y divide-white/10 mt-0 border-t border-white/10">
-                  {MORE.map(rec => (
-                    <RecordingRow
-                      key={rec.src}
-                      rec={rec}
-                      playing={playingRec?.src === rec.src}
-                      onPlay={handlePlay}
-                    />
-                  ))}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </motion.div>
-
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 2, delay: 2 }}
-          className="flex justify-center pb-16"
-        >
           <button
-            onClick={() => setShowPreview(true)}
-            className="text-sm tracking-widest text-white/40 hover:text-white/70 transition-colors duration-500 lowercase cursor-pointer"
+            onClick={() => setListening(true)}
+            className="text-xl tracking-wide text-white hover:text-white/70 transition-colors duration-500 cursor-pointer italic"
           >
-            [ preview the experience ]
+            Hear their answers
           </button>
         </motion.div>
 
       </div>
 
       <AnimatePresence>
-        {playingRec && playingAudio && (
-          <ListeningMode
-            key={playingRec.src}
-            rec={playingRec}
-            audio={playingAudio}
-            onClose={handleClose}
+        {listening && (
+          <ListenSequence
+            key="listen"
+            recordings={FEATURED}
+            onClose={() => setListening(false)}
           />
         )}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {showPreview && (
-          <ExperiencePreview onClose={() => setShowPreview(false)} />
-        )}
-      </AnimatePresence>
     </div>
   );
 }
