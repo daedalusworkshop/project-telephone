@@ -4,15 +4,15 @@ import { motion, AnimatePresence } from 'motion/react';
 type Recording = { label: string; src: string; cues?: string };
 
 const FEATURED: Recording[] = [
-  { label: 'Gabriel', src: '/operator/recordings/!! gabriel (recording-2026-02-28_22-05-04).wav',  cues: 'gabriel' },
-  { label: 'Ben',     src: '/operator/recordings/!! ben.wav',                                      cues: 'ben' },
-  { label: 'Wren',    src: '/operator/recordings/!! wren.wav',                                     cues: 'wren' },
+  { label: 'Gabriel', src: '/featured/gabriel.wav', cues: 'gabriel' },
+  { label: 'Ben',     src: '/featured/ben.wav',     cues: 'ben' },
+  { label: 'Wren',    src: '/featured/wren.wav',    cues: 'wren' },
 ];
 
 const MORE: Recording[] = [
-  { label: 'Kess',    src: '/operator/recordings/!! kess.wav',                                     cues: 'kess' },
-  { label: 'Kate',    src: '/operator/recordings/kate (recording-2026-03-02_23-32-33).wav',        cues: 'kate' },
-  { label: 'Justin',  src: '/tomorrow/recordings/justin!.wav',                                     cues: 'justin' },
+  { label: 'Kess',   src: '/featured/kess.wav',   cues: 'kess' },
+  { label: 'Kate',   src: '/featured/kate.wav',   cues: 'kate' },
+  { label: 'Justin', src: '/featured/justin.wav', cues: 'justin' },
 ];
 
 // ── Cue helpers ───────────────────────────────────────────────────────────────
