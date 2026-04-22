@@ -567,11 +567,11 @@ export default function Portfolio() {
           <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the recordings</p>
           <button
             onClick={() => setListening(true)}
-            className="group text-2xl tracking-wide text-white/90 hover:text-white/70 transition-colors duration-500 cursor-pointer italic relative"
+            className="group flex items-center gap-2.5 text-2xl tracking-wide text-white/90 hover:text-white cursor-pointer italic relative transition-colors duration-300"
           >
             <span className="relative">
               Hear their answers
-              <span className="absolute left-0 -bottom-0.5 h-px w-0 bg-white/50 group-hover:w-full transition-all duration-250 ease-in-out" />
+              <span className="absolute left-0 -bottom-0.5 h-px w-full bg-white/40" />
             </span>
           </button>
         </motion.div>
