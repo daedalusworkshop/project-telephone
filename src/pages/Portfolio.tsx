@@ -549,7 +549,7 @@ export default function Portfolio() {
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 2, delay: 1.5 }}
+          transition={{ duration: 2, delay: 3.4 }}
           className="mb-20"
         >
           <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the question</p>
@@ -561,7 +561,7 @@ export default function Portfolio() {
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 2, delay: 1.8 }}
+          transition={{ duration: 2, delay: 6 }}
           className="mb-24"
         >
           <p className="text-xs tracking-widest text-white/45 lowercase mb-4">the recordings</p>
@@ -575,6 +575,15 @@ export default function Portfolio() {
             </span>
           </button>
         </motion.div>
+
+        <motion.p
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 2, delay: 6 }}
+          className="text-[13px] tracking-wide text-white/25 italic"
+        >
+          (real humans recorded on a digital proof of concept)
+        </motion.p>
 
       </div>
 
